@@ -23,5 +23,7 @@ class DocumentSettings(ItemSettings):
 
     keep_nulls: bool = True
 
+    skip_indexes = False
+
     class Config:
         arbitrary_types_allowed = True

@@ -272,7 +272,6 @@ class Initializer:
             and document_settings.name
             not in await self.database.list_collection_names()
         ):
-
             collection = await self.database.create_collection(
                 **document_settings.timeseries.build_query(
                     document_settings.name
@@ -396,7 +395,8 @@ class Initializer:
                 cls._inheritance_inited = True
 
             await self.init_document_collection(cls)
-            await self.init_indexes(cls, self.allow_index_dropping)
+            if not cls.get_settings().skip_indexes is True:
+                await self.init_indexes(cls, self.allow_index_dropping)
             self.init_document_fields(cls)
             self.init_cache(cls)
             self.init_actions(cls)
