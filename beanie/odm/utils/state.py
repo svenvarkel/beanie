@@ -1,6 +1,6 @@
 import inspect
 from functools import wraps
-from typing import Callable, TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 from beanie.exceptions import StateManagementIsTurnedOff, StateNotSaved
 
@@ -65,16 +65,6 @@ def save_state_after(f: Callable):
     async def wrapper(self: "DocType", *args, **kwargs):
         result = await f(self, *args, **kwargs)
         self._save_state()
-        return result
-
-    return wrapper
-
-
-def swap_revision_after(f: Callable):
-    @wraps(f)
-    async def wrapper(self: "DocType", *args, **kwargs):
-        result = await f(self, *args, **kwargs)
-        self._swap_revision()
         return result
 
     return wrapper

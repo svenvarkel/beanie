@@ -1,14 +1,14 @@
 from abc import abstractmethod
-from typing import Dict, Mapping, Union, Any, Optional
+from typing import Any, Dict, Mapping, Optional, Union
 
 from pymongo.client_session import ClientSession
 
 from beanie.odm.bulk import BulkWriter
 from beanie.odm.fields import ExpressionField
 from beanie.odm.operators.update.general import (
-    Set,
     CurrentDate,
     Inc,
+    Set,
 )
 
 
@@ -23,7 +23,7 @@ class UpdateMethods:
         *args: Mapping[str, Any],
         session: Optional[ClientSession] = None,
         bulk_writer: Optional[BulkWriter] = None,
-        **kwargs
+        **kwargs,
     ):
         return self
 
@@ -32,7 +32,7 @@ class UpdateMethods:
         expression: Dict[Union[ExpressionField, str], Any],
         session: Optional[ClientSession] = None,
         bulk_writer: Optional[BulkWriter] = None,
-        **kwargs
+        **kwargs,
     ):
         """
         Set values
@@ -48,7 +48,7 @@ class UpdateMethods:
 
         ```
 
-        Uses [Set operator](https://roman-right.github.io/beanie/api/operators/update/#set)
+        Uses [Set operator](operators/update.md#set)
 
         :param expression: Dict[Union[ExpressionField, str], Any] - keys and
         values to set
@@ -65,12 +65,12 @@ class UpdateMethods:
         expression: Dict[Union[ExpressionField, str], Any],
         session: Optional[ClientSession] = None,
         bulk_writer: Optional[BulkWriter] = None,
-        **kwargs
+        **kwargs,
     ):
         """
         Set current date
 
-        Uses [CurrentDate operator](https://roman-right.github.io/beanie/api/operators/update/#currentdate)
+        Uses [CurrentDate operator](operators/update.md#currentdate)
 
         :param expression: Dict[Union[ExpressionField, str], Any]
         :param session: Optional[ClientSession] - pymongo session
@@ -81,7 +81,7 @@ class UpdateMethods:
             CurrentDate(expression),
             session=session,
             bulk_writer=bulk_writer,
-            **kwargs
+            **kwargs,
         )
 
     def inc(
@@ -89,7 +89,7 @@ class UpdateMethods:
         expression: Dict[Union[ExpressionField, str], Any],
         session: Optional[ClientSession] = None,
         bulk_writer: Optional[BulkWriter] = None,
-        **kwargs
+        **kwargs,
     ):
         """
         Increment
@@ -105,7 +105,7 @@ class UpdateMethods:
 
         ```
 
-        Uses [Inc operator](https://roman-right.github.io/beanie/api/operators/update/#inc)
+        Uses [Inc operator](operators/update.md#inc)
 
         :param expression: Dict[Union[ExpressionField, str], Any]
         :param session: Optional[ClientSession] - pymongo session

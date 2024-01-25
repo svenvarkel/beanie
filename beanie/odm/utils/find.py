@@ -1,8 +1,6 @@
-from typing import TYPE_CHECKING, Any, Dict, List, Type
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type
 
-from beanie.exceptions import NotSupported
 from beanie.odm.fields import LinkInfo, LinkTypes
-from beanie.odm.interfaces.detector import ModelType
 
 if TYPE_CHECKING:
     from beanie import Document
@@ -12,17 +10,27 @@ if TYPE_CHECKING:
 #  appending subqueries to the queries var
 
 
-def construct_lookup_queries(cls: Type["Document"]) -> List[Dict[str, Any]]:
-    if cls.get_model_type() == ModelType.UnionDoc:
-        raise NotSupported("UnionDoc doesn't support link fetching")
+def construct_lookup_queries(
+    cls: Type["Document"],
+    nesting_depth: Optional[int] = None,
+    nesting_depths_per_field: Optional[Dict[str, int]] = None,
+) -> List[Dict[str, Any]]:
     queries: List = []
     link_fields = cls.get_link_fields()
     if link_fields is not None:
         for link_info in link_fields.values():
+            final_nesting_depth = (
+                nesting_depths_per_field.get(link_info.field_name, None)
+                if nesting_depths_per_field is not None
+                else None
+            )
+            if final_nesting_depth is None:
+                final_nesting_depth = nesting_depth
             construct_query(
                 link_info=link_info,
                 queries=queries,
                 database_major_version=cls._database_major_version,
+                current_depth=final_nesting_depth,
             )
     return queries
 
@@ -31,7 +39,12 @@ def construct_query(
     link_info: LinkInfo,
     queries: List,
     database_major_version: int,
+    current_depth: Optional[int] = None,
 ):
+    if link_info.is_fetchable is False or (
+        current_depth is not None and current_depth <= 0
+    ):
+        return
     if link_info.link_type in [
         LinkTypes.DIRECT,
         LinkTypes.OPTIONAL_DIRECT,
@@ -40,7 +53,7 @@ def construct_query(
             lookup_steps = [
                 {
                     "$lookup": {
-                        "from": link_info.model_class.get_motor_collection().name,  # type: ignore
+                        "from": link_info.document_class.get_motor_collection().name,  # type: ignore
                         "localField": f"{link_info.lookup_field_name}.$id",
                         "foreignField": "_id",
                         "as": f"_link_{link_info.field_name}",
@@ -70,6 +83,9 @@ def construct_query(
                 },
                 {"$unset": f"_link_{link_info.field_name}"},
             ]  # type: ignore
+            new_depth = (
+                current_depth - 1 if current_depth is not None else None
+            )
             if link_info.nested_links is not None:
                 lookup_steps[0]["$lookup"]["pipeline"] = []  # type: ignore
                 for nested_link in link_info.nested_links:
@@ -77,6 +93,7 @@ def construct_query(
                         link_info=link_info.nested_links[nested_link],
                         queries=lookup_steps[0]["$lookup"]["pipeline"],  # type: ignore
                         database_major_version=database_major_version,
+                        current_depth=new_depth,
                     )
             queries += lookup_steps
 
@@ -84,7 +101,7 @@ def construct_query(
             lookup_steps = [
                 {
                     "$lookup": {
-                        "from": link_info.model_class.get_motor_collection().name,  # type: ignore
+                        "from": link_info.document_class.get_motor_collection().name,  # type: ignore
                         "let": {
                             "link_id": f"${link_info.lookup_field_name}.$id"
                         },
@@ -122,11 +139,15 @@ def construct_query(
                 },
                 {"$unset": f"_link_{link_info.field_name}"},
             ]
+            new_depth = (
+                current_depth - 1 if current_depth is not None else None
+            )
             for nested_link in link_info.nested_links:
                 construct_query(
                     link_info=link_info.nested_links[nested_link],
                     queries=lookup_steps[0]["$lookup"]["pipeline"],  # type: ignore
                     database_major_version=database_major_version,
+                    current_depth=new_depth,
                 )
             queries += lookup_steps
 
@@ -138,7 +159,7 @@ def construct_query(
             lookup_steps = [
                 {
                     "$lookup": {
-                        "from": link_info.model_class.get_motor_collection().name,  # type: ignore
+                        "from": link_info.document_class.get_motor_collection().name,  # type: ignore
                         "localField": "_id",
                         "foreignField": f"{link_info.lookup_field_name}.$id",
                         "as": f"_link_{link_info.field_name}",
@@ -168,6 +189,9 @@ def construct_query(
                 },
                 {"$unset": f"_link_{link_info.field_name}"},
             ]  # type: ignore
+            new_depth = (
+                current_depth - 1 if current_depth is not None else None
+            )
             if link_info.nested_links is not None:
                 lookup_steps[0]["$lookup"]["pipeline"] = []  # type: ignore
                 for nested_link in link_info.nested_links:
@@ -175,6 +199,7 @@ def construct_query(
                         link_info=link_info.nested_links[nested_link],
                         queries=lookup_steps[0]["$lookup"]["pipeline"],  # type: ignore
                         database_major_version=database_major_version,
+                        current_depth=new_depth,
                     )
             queries += lookup_steps
 
@@ -182,7 +207,7 @@ def construct_query(
             lookup_steps = [
                 {
                     "$lookup": {
-                        "from": link_info.model_class.get_motor_collection().name,  # type: ignore
+                        "from": link_info.document_class.get_motor_collection().name,  # type: ignore
                         "let": {"link_id": "$_id"},
                         "as": f"_link_{link_info.field_name}",
                         "pipeline": [
@@ -223,11 +248,15 @@ def construct_query(
                 },
                 {"$unset": f"_link_{link_info.field_name}"},
             ]
+            new_depth = (
+                current_depth - 1 if current_depth is not None else None
+            )
             for nested_link in link_info.nested_links:
                 construct_query(
                     link_info=link_info.nested_links[nested_link],
                     queries=lookup_steps[0]["$lookup"]["pipeline"],  # type: ignore
                     database_major_version=database_major_version,
+                    current_depth=new_depth,
                 )
             queries += lookup_steps
 
@@ -239,14 +268,16 @@ def construct_query(
             queries.append(
                 {
                     "$lookup": {
-                        "from": link_info.model_class.get_motor_collection().name,  # type: ignore
+                        "from": link_info.document_class.get_motor_collection().name,  # type: ignore
                         "localField": f"{link_info.lookup_field_name}.$id",
                         "foreignField": "_id",
                         "as": link_info.field_name,
                     }
                 }
             )
-
+            new_depth = (
+                current_depth - 1 if current_depth is not None else None
+            )
             if link_info.nested_links is not None:
                 queries[-1]["$lookup"]["pipeline"] = []
                 for nested_link in link_info.nested_links:
@@ -254,11 +285,12 @@ def construct_query(
                         link_info=link_info.nested_links[nested_link],
                         queries=queries[-1]["$lookup"]["pipeline"],
                         database_major_version=database_major_version,
+                        current_depth=new_depth,
                     )
         else:
             lookup_step = {
                 "$lookup": {
-                    "from": link_info.model_class.get_motor_collection().name,  # type: ignore
+                    "from": link_info.document_class.get_motor_collection().name,  # type: ignore
                     "let": {"link_id": f"${link_info.lookup_field_name}.$id"},
                     "as": link_info.field_name,
                     "pipeline": [
@@ -266,12 +298,15 @@ def construct_query(
                     ],
                 }
             }
-
+            new_depth = (
+                current_depth - 1 if current_depth is not None else None
+            )
             for nested_link in link_info.nested_links:
                 construct_query(
                     link_info=link_info.nested_links[nested_link],
                     queries=lookup_step["$lookup"]["pipeline"],
                     database_major_version=database_major_version,
+                    current_depth=new_depth,
                 )
             queries.append(lookup_step)
 
@@ -283,14 +318,16 @@ def construct_query(
             queries.append(
                 {
                     "$lookup": {
-                        "from": link_info.model_class.get_motor_collection().name,  # type: ignore
+                        "from": link_info.document_class.get_motor_collection().name,  # type: ignore
                         "localField": "_id",
                         "foreignField": f"{link_info.lookup_field_name}.$id",
                         "as": link_info.field_name,
                     }
                 }
             )
-
+            new_depth = (
+                current_depth - 1 if current_depth is not None else None
+            )
             if link_info.nested_links is not None:
                 queries[-1]["$lookup"]["pipeline"] = []
                 for nested_link in link_info.nested_links:
@@ -298,11 +335,12 @@ def construct_query(
                         link_info=link_info.nested_links[nested_link],
                         queries=queries[-1]["$lookup"]["pipeline"],
                         database_major_version=database_major_version,
+                        current_depth=new_depth,
                     )
         else:
             lookup_step = {
                 "$lookup": {
-                    "from": link_info.model_class.get_motor_collection().name,  # type: ignore
+                    "from": link_info.document_class.get_motor_collection().name,  # type: ignore
                     "let": {"link_id": "$_id"},
                     "as": link_info.field_name,
                     "pipeline": [
@@ -319,13 +357,47 @@ def construct_query(
                     ],
                 }
             }
-
+            new_depth = (
+                current_depth - 1 if current_depth is not None else None
+            )
             for nested_link in link_info.nested_links:
                 construct_query(
                     link_info=link_info.nested_links[nested_link],
                     queries=lookup_step["$lookup"]["pipeline"],
                     database_major_version=database_major_version,
+                    current_depth=new_depth,
                 )
             queries.append(lookup_step)
 
     return queries
+
+
+def split_text_query(
+    query: Dict[str, Any]
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Divide query into text and non-text matches
+
+    :param query: Dict[str, Any] - query dict
+    :return: Tuple[Dict[str, Any], Dict[str, Any]] - text and non-text queries,
+        respectively
+    """
+
+    root_text_query_args: Dict[str, Any] = query.get("$text", None)
+    root_non_text_queries: Dict[str, Any] = {
+        k: v for k, v in query.items() if k not in {"$text", "$and"}
+    }
+
+    text_queries: List[Dict[str, Any]] = (
+        [{"$text": root_text_query_args}] if root_text_query_args else []
+    )
+    non_text_queries: List[Dict[str, Any]] = (
+        [root_non_text_queries] if root_non_text_queries else []
+    )
+
+    for match_case in query.get("$and", []):
+        if "$text" in match_case:
+            text_queries.append(match_case)
+        else:
+            non_text_queries.append(match_case)
+
+    return text_queries, non_text_queries

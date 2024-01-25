@@ -1,18 +1,24 @@
 import re
-from datetime import datetime, date
+from datetime import date, datetime
+from uuid import uuid4
 
+import pytest
 from bson import Binary, Regex
+from pydantic import AnyUrl
 
 from beanie.odm.utils.encoder import Encoder
+from beanie.odm.utils.pydantic import IS_PYDANTIC_V2
 from tests.odm.models import (
+    Child,
     DocumentForEncodingTest,
     DocumentForEncodingTestDate,
-    DocumentWithStringField,
-    SampleWithMutableObjects,
-    Child,
+    DocumentWithComplexDictKey,
     DocumentWithDecimalField,
+    DocumentWithHttpUrlField,
     DocumentWithKeepNullsFalse,
+    DocumentWithStringField,
     ModelWithOptionalField,
+    SampleWithMutableObjects,
 )
 
 
@@ -125,3 +131,41 @@ def test_keep_nulls_false():
     encoder = Encoder(keep_nulls=False, to_db=True)
     encoded_doc = encoder.encode(doc)
     assert encoded_doc == {"m": {"i": 10}}
+
+
+@pytest.mark.skipif(not IS_PYDANTIC_V2, reason="Test only for Pydantic v2")
+def test_should_encode_pydantic_v2_url_correctly():
+    url = AnyUrl("https://example.com")
+    encoder = Encoder()
+    encoded_url = encoder.encode(url)
+    assert isinstance(encoded_url, str)
+    # pydantic2 add trailing slash for naked url. see https://github.com/pydantic/pydantic/issues/6943
+    assert encoded_url == "https://example.com/"
+
+
+async def test_should_be_able_to_save_retrieve_doc_with_url():
+    doc = DocumentWithHttpUrlField(url_field="https://example.com")
+    assert isinstance(doc.url_field, AnyUrl)
+    await doc.save()
+
+    new_doc = await DocumentWithHttpUrlField.find_one(
+        DocumentWithHttpUrlField.id == doc.id
+    )
+
+    assert isinstance(new_doc.url_field, AnyUrl)
+    assert new_doc.url_field == doc.url_field
+
+
+async def test_dict_with_complex_key():
+    assert isinstance(Encoder().encode({uuid4(): datetime.now()}), dict)
+
+    uuid = uuid4()
+    # reset microseconds, because it looses by mongo
+    dt = datetime.now().replace(microsecond=0)
+
+    doc = DocumentWithComplexDictKey(dict_field={uuid: dt})
+    await doc.insert()
+    new_doc = await DocumentWithComplexDictKey.get(doc.id)
+
+    assert isinstance(new_doc.dict_field, dict)
+    assert new_doc.dict_field.get(uuid) == dt

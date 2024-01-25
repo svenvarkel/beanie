@@ -53,7 +53,7 @@ products = await Product.find(
 ).to_list()
 ```
 
-The whole list of the find query operators can be found [here](/api-documentation/operators/find).
+The whole list of the find query operators can be found [here](../api-documentation/operators/find.md).
 
 For more complex cases native PyMongo syntax is also supported:
 
@@ -64,17 +64,49 @@ products = await Product.find({"price": 1000}).to_list()
 ## Finding single documents
 
 Sometimes you will only need to find a single document. 
-If you are searching by `id`, then you can use the [get](/api-documentation/document/#documentget) method:
+If you are searching by `id`, then you can use the [get](../api-documentation/document.md/#documentget) method:
 
 ```python
 bar = await Product.get("608da169eb9e17281f0ab2ff")
 ```
 
 To find a single document via a single search criterion,
-you can use the [find_one](/api-documentation/interfaces/#findinterfacefind_one) method:
+you can use the [find_one](../api-documentation/interfaces.md/#findinterfacefind_one) method:
 
 ```python
 bar = await Product.find_one(Product.name == "Peanut Bar")
+```
+
+## Syncing from the Database
+
+If you wish to apply changes from the database to the document, utilize the [sync](../api-documentation/document.md/#documentsync) method:
+
+```python
+await bar.sync()
+```
+
+Two merging strategies are available: `local` and `remote`.
+
+### Remote Merge Strategy
+
+The remote merge strategy replaces the local document with the one from the database, disregarding local changes:
+
+```python
+from beanie import MergeStrategy
+
+await bar.sync(merge_strategy=MergeStrategy.remote)
+```
+The remote merge strategy is the default.
+
+### Local Merge Strategy
+
+The local merge strategy retains changes made locally to the document and updates other fields from the database.
+**BE CAREFUL**: it may raise an `ApplyChangesException` in case of a merging conflict.
+
+```python
+from beanie import MergeStrategy
+
+await bar.sync(merge_strategy=MergeStrategy.local)
 ```
 
 ## More complex queries
@@ -102,7 +134,7 @@ chocolates = await Product
 
 ### Sorting
 
-Sorting can be done with the [sort](/api-documentation/query#sort) method.
+Sorting can be done with the [sort](../api-documentation/query.md/#findmanysort) method.
 
 You can pass it one or multiple fields to sort by. You may optionally specify a `+` or `-` 
 (denoting ascending and descending respectively).

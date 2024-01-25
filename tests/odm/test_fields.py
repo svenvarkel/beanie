@@ -1,7 +1,9 @@
 import datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Mapping, AbstractSet
+from typing import AbstractSet, Mapping
+from uuid import uuid4
+
 import pytest
 from pydantic import BaseModel, ValidationError
 
@@ -10,10 +12,13 @@ from beanie.exceptions import CollectionWasNotInitialized
 from beanie.odm.fields import PydanticObjectId
 from beanie.odm.utils.dump import get_dict
 from beanie.odm.utils.encoder import Encoder
+from beanie.odm.utils.pydantic import IS_PYDANTIC_V2
 from tests.odm.models import (
-    DocumentWithCustomFiledsTypes,
-    DocumentWithBsonEncodersFiledsTypes,
     DocumentTestModel,
+    DocumentTestModelIndexFlagsAnnotated,
+    DocumentWithBsonEncodersFiledsTypes,
+    DocumentWithCustomFiledsTypes,
+    DocumentWithDeprecatedHiddenField,
     Sample,
 )
 
@@ -104,10 +109,22 @@ async def test_custom_filed_types():
     )
 
 
-async def test_hidden(document):
+async def test_excluded(document):
     document = await DocumentTestModel.find_one()
+    if IS_PYDANTIC_V2:
+        assert "test_list" not in document.model_dump()
+    else:
+        assert "test_list" not in document.dict()
 
-    assert "test_list" not in document.dict()
+
+async def test_hidden():
+    document = DocumentWithDeprecatedHiddenField(test_hidden=["abc", "def"])
+    await document.insert()
+    document = await DocumentWithDeprecatedHiddenField.find_one()
+    if IS_PYDANTIC_V2:
+        assert "test_hidden" not in document.model_dump()
+    else:
+        assert "test_hidden" not in document.dict()
 
 
 def test_revision_id_not_in_schema():
@@ -118,7 +135,10 @@ def test_revision_id_not_in_schema():
 
         bar: int = 3
 
-    schema = Foo.schema()
+    if IS_PYDANTIC_V2:
+        schema = Foo.model_json_schema()
+    else:
+        schema = Foo.schema()
     assert "revision_id" not in schema["properties"]
 
     # check that the document has not been initialized,
@@ -130,8 +150,10 @@ def test_revision_id_not_in_schema():
 @pytest.mark.parametrize("exclude", [{"test_int"}, {"test_doc": {"test_int"}}])
 async def test_param_exclude(document, exclude):
     document = await DocumentTestModel.find_one()
-
-    doc_dict = document.dict(exclude=exclude)
+    if IS_PYDANTIC_V2:
+        doc_dict = document.model_dump(exclude=exclude)
+    else:
+        doc_dict = document.dict(exclude=exclude)
     if isinstance(exclude, AbstractSet):
         for k in exclude:
             assert k not in doc_dict
@@ -147,3 +169,17 @@ async def test_param_exclude(document, exclude):
 def test_expression_fields():
     assert Sample.nested.integer == "nested.integer"
     assert Sample.nested["integer"] == "nested.integer"
+
+
+def test_indexed_field() -> None:
+    """Test that fields can be declared and instantiated with Indexed()
+    and Annotated[..., Indexed()]."""
+
+    # No error should be raised the document is properly initialized
+    # and `Indexed` is implemented correctly.
+    DocumentTestModelIndexFlagsAnnotated(
+        str_index="test",
+        str_index_annotated="test",
+        uuid_index=uuid4(),
+        uuid_index_annotated=uuid4(),
+    )

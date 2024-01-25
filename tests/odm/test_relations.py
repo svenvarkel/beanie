@@ -3,72 +3,83 @@ from typing import List
 import pytest
 from pydantic.fields import Field
 
-from beanie import init_beanie, Document
+from beanie import Document, init_beanie
 from beanie.exceptions import DocumentWasNotSaved
-from beanie.odm.fields import DeleteRules, Link, WriteRules, BackLink
+from beanie.odm.fields import (
+    BackLink,
+    DeleteRules,
+    Link,
+    WriteRules,
+)
+from beanie.odm.utils.pydantic import (
+    IS_PYDANTIC_V2,
+    get_model_fields,
+    parse_model,
+)
+from beanie.operators import In, Or
 from tests.odm.models import (
-    Door,
-    House,
-    Lock,
-    Roof,
-    Window,
-    Yard,
-    RootDocument,
+    AddressView,
     ADocument,
     BDocument,
-    UsersAddresses,
-    Region,
-    AddressView,
-    SelfLinked,
-    LoopedLinksA,
-    LoopedLinksB,
+    DocumentToBeLinked,
     DocumentWithBackLink,
+    DocumentWithBackLinkForNesting,
     DocumentWithLink,
+    DocumentWithLinkForNesting,
     DocumentWithListBackLink,
     DocumentWithListLink,
     DocumentWithListOfLinks,
-    DocumentToBeLinked,
+    DocumentWithTextIndexAndLink,
+    Door,
+    House,
+    LinkDocumentForTextSeacrh,
+    Lock,
+    LongSelfLink,
+    LoopedLinksA,
+    LoopedLinksB,
+    Region,
+    Roof,
+    RootDocument,
+    SelfLinked,
+    UsersAddresses,
+    Window,
+    Yard,
 )
 
 
-@pytest.fixture
-def lock_not_inserted():
+def lock_not_inserted_fn():
     return Lock(k=10)
 
 
 @pytest.fixture
 def locks_not_inserted():
-    return [Lock(k=10), Lock(k=11)]
+    return [Lock(k=10001), Lock(k=20002)]
 
 
 @pytest.fixture
-def window_not_inserted(lock_not_inserted):
-    return Window(x=10, y=10, lock=lock_not_inserted)
+def window_not_inserted():
+    return Window(x=10, y=10, lock=lock_not_inserted_fn())
 
 
 @pytest.fixture
-def windows_not_inserted(lock_not_inserted):
+def windows_not_inserted():
     return [
         Window(
             x=10,
             y=10,
-            lock=lock_not_inserted,
+            lock=lock_not_inserted_fn(),
         ),
         Window(
             x=11,
             y=11,
-            lock=lock_not_inserted,
+            lock=lock_not_inserted_fn(),
         ),
     ]
 
 
 @pytest.fixture
-def door_not_inserted(locks_not_inserted, window_not_inserted):
-    return Door(
-        t=10,
-        window=window_not_inserted,
-        locks=locks_not_inserted,
-    )
+def door_not_inserted(window_not_inserted, locks_not_inserted):
+    return Door(t=10, window=window_not_inserted, locks=locks_not_inserted)
 
 
 @pytest.fixture
@@ -135,7 +146,6 @@ class TestInsert:
         house_not_inserted,
         door_not_inserted,
         window_not_inserted,
-        lock_not_inserted,
         locks_not_inserted,
     ):
         lock_links = []
@@ -145,7 +155,7 @@ class TestInsert:
             lock_links.append(link)
         door_not_inserted.locks = lock_links
 
-        door_window_lock = await lock_not_inserted.insert()
+        door_window_lock = await lock_not_inserted_fn().insert()
         door_window_lock_link = Lock.link_from_id(door_window_lock.id)
         window_not_inserted.lock = door_window_lock_link
 
@@ -157,9 +167,12 @@ class TestInsert:
         door_link = Door.link_from_id(door.id)
         house_not_inserted.door = door_link
 
-        house = House.parse_obj(house_not_inserted)
+        house = parse_model(House, house_not_inserted)
         await house.insert(link_rule=WriteRules.WRITE)
-        house.json()
+        if IS_PYDANTIC_V2:
+            house.model_dump_json()
+        else:
+            house.json()
 
     async def test_multi_insert_links(self):
         house = House(name="random", windows=[], door=Door())
@@ -168,12 +181,21 @@ class TestInsert:
         house.windows.append(window)
 
         house = await house.insert(link_rule=WriteRules.WRITE)
-        new_window = Window(x=11, y=22)
-        house.windows.append(new_window)
+        new_window_1 = Window(x=11, y=22)
+        assert new_window_1.id is None
+        house.windows.append(new_window_1)
+        new_window_2 = Window(x=12, y=23)
+        assert new_window_2.id is None
+        house.windows.append(new_window_2)
         await house.save(link_rule=WriteRules.WRITE)
         for win in house.windows:
             assert isinstance(win, Window)
             assert win.id
+        assert new_window_1.id is not None
+        assert new_window_2.id is not None
+
+    async def test_fetch_after_insert(self, house_not_inserted):
+        await house_not_inserted.fetch_all_links()
 
 
 class TestFind:
@@ -308,6 +330,31 @@ class TestFind:
         assert house_1 is not None
         assert house_2 is not None
 
+    async def test_find_by_id_list_of_the_linked_docs(self, houses):
+        items = (
+            await House.find(House.height < 3, fetch_links=True)
+            .sort(House.height)
+            .to_list()
+        )
+        assert len(items) == 3
+
+        house_lst_1 = await House.find(
+            Or(
+                House.door.id == items[0].door.id,
+                In(House.door.id, [items[1].door.id, items[2].door.id]),
+            )
+        ).to_list()
+        house_lst_2 = await House.find(
+            Or(
+                House.door.id == items[0].door.id,
+                In(House.door.id, [items[1].door.id, items[2].door.id]),
+            ),
+            fetch_links=True,
+        ).to_list()
+
+        assert len(house_lst_1) == 3
+        assert len(house_lst_2) == 3
+
     async def test_fetch_list_with_some_prefetched(self):
         docs = []
         for i in range(10):
@@ -334,6 +381,53 @@ class TestFind:
         for i in range(10):
             assert doc_with_links.links[i].id == docs[i].id
 
+    async def test_text_search(self):
+        doc = DocumentWithTextIndexAndLink(
+            s="hello world", link=LinkDocumentForTextSeacrh(i=1)
+        )
+        await doc.insert(link_rule=WriteRules.WRITE)
+
+        doc2 = DocumentWithTextIndexAndLink(
+            s="hi world", link=LinkDocumentForTextSeacrh(i=2)
+        )
+        await doc2.insert(link_rule=WriteRules.WRITE)
+
+        docs = await DocumentWithTextIndexAndLink.find(
+            {"$text": {"$search": "hello"}}, fetch_links=True
+        ).to_list()
+        assert len(docs) == 1
+
+    async def test_self_nesting_find_parameters(self):
+        self_linked_doc = LongSelfLink()
+        await self_linked_doc.insert(link_rule=WriteRules.WRITE)
+        self_linked_doc.link = self_linked_doc
+        await self_linked_doc.save()
+
+        self_linked_doc = await LongSelfLink.find_one(
+            nesting_depth=4, fetch_links=True
+        )
+        assert self_linked_doc.link.link.link.link.id == self_linked_doc.id
+        assert isinstance(self_linked_doc.link.link.link.link.link, Link)
+
+        self_linked_doc = await LongSelfLink.find_one(
+            nesting_depth=0, fetch_links=True
+        )
+        assert isinstance(self_linked_doc.link, Link)
+
+    async def test_nesting_find_parameters(self):
+        back_link_doc = DocumentWithBackLinkForNesting(i=1)
+        await back_link_doc.insert()
+        link_doc = DocumentWithLinkForNesting(link=back_link_doc, s="TEST")
+        await link_doc.insert()
+
+        doc = await DocumentWithBackLinkForNesting.find_one(
+            DocumentWithBackLinkForNesting.i == 1,
+            fetch_links=True,
+            nesting_depths_per_field={"back_link": 2},
+        )
+        assert doc.back_link.link.id == doc.id
+        assert isinstance(doc.back_link.link.back_link, BackLink)
+
 
 class TestReplace:
     async def test_do_nothing(self, house):
@@ -358,15 +452,20 @@ class TestSave:
 
     async def test_write(self, house):
         house.door.t = 100
-        house.windows = [Window(x=100, y=100, lock=Lock(k=100))]
+        new_window = Window(x=100, y=100, lock=Lock(k=100))
+        house.windows = [new_window]
+        assert new_window.id is None
         await house.save(link_rule=WriteRules.WRITE)
         new_house = await House.get(house.id, fetch_links=True)
         assert new_house.door.t == 100
         for window in new_house.windows:
             assert window.x == 100
             assert window.y == 100
+            assert window.id is not None
             assert isinstance(window.lock, Lock)
             assert window.lock.k == 100
+            assert window.lock.id is not None
+        assert new_window.id is not None
 
 
 class TestDelete:
@@ -397,19 +496,19 @@ class TestOther:
     async def test_query_composition(self):
         SYS = {"id", "revision_id"}
 
-        # Simple fields are initialized using the pydantic __fields__ internal property
+        # Simple fields are initialized using the pydantic model_fields internal property
         # such fields are properly isolated when multi inheritance is involved.
-        assert set(RootDocument.__fields__.keys()) == SYS | {
+        assert set(get_model_fields(RootDocument).keys()) == SYS | {
             "name",
             "link_root",
         }
-        assert set(ADocument.__fields__.keys()) == SYS | {
+        assert set(get_model_fields(ADocument).keys()) == SYS | {
             "name",
             "link_root",
             "surname",
             "link_a",
         }
-        assert set(BDocument.__fields__.keys()) == SYS | {
+        assert set(get_model_fields(BDocument).keys()) == SYS | {
             "name",
             "link_root",
             "email",
@@ -459,14 +558,35 @@ class TestOther:
 
     async def test_looped_links(self):
         await LoopedLinksA(
-            b=LoopedLinksB(a=LoopedLinksA(b=LoopedLinksB()))
+            b=LoopedLinksB(
+                a=LoopedLinksA(
+                    b=LoopedLinksB(
+                        s="4",
+                    ),
+                    s="3",
+                ),
+                s="2",
+            ),
+            s="1",
         ).insert(link_rule=WriteRules.WRITE)
-        res = await LoopedLinksA.find_one(fetch_links=True)
+        res = await LoopedLinksA.find_one(
+            LoopedLinksA.s == "1", fetch_links=True
+        )
         assert isinstance(res, LoopedLinksA)
         assert isinstance(res.b, LoopedLinksB)
         assert isinstance(res.b.a, LoopedLinksA)
-        assert isinstance(res.b.a.b, LoopedLinksB)
-        assert res.b.a.b.a is None
+        assert isinstance(res.b.a.b, Link)
+
+        await LoopedLinksA(
+            b=LoopedLinksB(s="a2"),
+            s="a1",
+        ).insert(link_rule=WriteRules.WRITE)
+        res = await LoopedLinksA.find_one(
+            LoopedLinksA.s == "a1", fetch_links=True
+        )
+        assert isinstance(res, LoopedLinksA)
+        assert isinstance(res.b, LoopedLinksB)
+        assert res.b.a is None
 
     async def test_with_chaining_aggregation(self):
         region = Region()
@@ -491,9 +611,48 @@ class TestOther:
 
         assert addresses_count[0] == {"count": 10}
 
+    async def test_with_chaining_aggregation_and_text_search(self):
+        # ARRANGE
+        NUM_DOCS = 10
+        NUM_WITH_LOWER = 5
+        linked_document = LinkDocumentForTextSeacrh(i=1)
+        await linked_document.insert()
+
+        for i in range(NUM_DOCS):
+            await DocumentWithTextIndexAndLink(
+                s="lower" if i < NUM_WITH_LOWER else "UPPER",
+                link=linked_document,
+            ).insert()
+
+        linked_document_2 = LinkDocumentForTextSeacrh(i=2)
+        await linked_document_2.insert()
+
+        for i in range(NUM_DOCS):
+            await DocumentWithTextIndexAndLink(
+                s="lower" if i < NUM_WITH_LOWER else "UPPER",
+                link=linked_document_2,
+            ).insert()
+
+        # ACT
+        query = DocumentWithTextIndexAndLink.find(
+            {"$text": {"$search": "lower"}},
+            DocumentWithTextIndexAndLink.link.i == 1,
+            fetch_links=True,
+        )
+
+        # Test both aggregation and count methods
+        document_count_aggregation = await query.aggregate(
+            [{"$count": "count"}]
+        ).to_list()
+        document_count = await query.count()
+
+        # ASSERT
+        assert document_count_aggregation[0] == {"count": NUM_WITH_LOWER}
+        assert document_count == NUM_WITH_LOWER
+
     async def test_with_extra_allow(self, houses):
         res = await House.find(fetch_links=True).to_list()
-        assert res[0].__fields__.keys() == {
+        assert get_model_fields(res[0]).keys() == {
             "id",
             "revision_id",
             "windows",
@@ -505,7 +664,7 @@ class TestOther:
         }
 
         res = await House.find_one(fetch_links=True)
-        assert res.__fields__.keys() == {
+        assert get_model_fields(res).keys() == {
             "id",
             "revision_id",
             "windows",
@@ -551,6 +710,30 @@ class TestFindBackLinks:
         )
         assert back_link_doc.back_link[0].id == link_doc.id
         assert back_link_doc.back_link[0].link[0].id == back_link_doc.id
+
+    async def test_nesting(self):
+        back_link_doc = DocumentWithBackLinkForNesting(i=1)
+        await back_link_doc.insert()
+        link_doc = DocumentWithLinkForNesting(link=back_link_doc, s="TEST")
+        await link_doc.insert()
+
+        doc = await DocumentWithLinkForNesting.get(
+            link_doc.id, fetch_links=True
+        )
+        assert isinstance(doc.link, Link)
+        doc.link = await doc.link.fetch()
+        assert doc.link.i == 1
+
+        back_link_doc = await DocumentWithBackLinkForNesting.get(
+            back_link_doc.id, fetch_links=True
+        )
+        assert (
+            back_link_doc.back_link.link.back_link.link.back_link.id
+            == link_doc.id
+        )
+        assert isinstance(
+            back_link_doc.back_link.link.back_link.link.back_link.link, Link
+        )
 
 
 class TestReplaceBackLinks:
@@ -666,14 +849,26 @@ class HouseForReversedOrderInit(Document):
 class DoorForReversedOrderInit(Document):
     height: int = 2
     width: int = 1
-    house: BackLink[HouseForReversedOrderInit] = Field(original_field="door")
+    if IS_PYDANTIC_V2:
+        house: BackLink[HouseForReversedOrderInit] = Field(
+            json_schema_extra={"original_field": "door"}
+        )
+    else:
+        house: BackLink[HouseForReversedOrderInit] = Field(
+            original_field="door"
+        )
 
 
 class PersonForReversedOrderInit(Document):
     name: str
-    house: List[BackLink[HouseForReversedOrderInit]] = Field(
-        original_field="owners"
-    )
+    if IS_PYDANTIC_V2:
+        house: List[BackLink[HouseForReversedOrderInit]] = Field(
+            json_schema_extra={"original_field": "owners"}
+        )
+    else:
+        house: List[BackLink[HouseForReversedOrderInit]] = Field(
+            original_field="owners"
+        )
 
 
 class TestDeleteBackLinks:
@@ -732,3 +927,36 @@ class TestDeleteBackLinks:
                 PersonForReversedOrderInit,
             ],
         )
+
+
+class TestBuildAggregations:
+    async def test_find_aggregate_without_fetch_links(self, houses):
+        door = await Door.find_one()
+        aggregation = House.find(House.door.id == door.id).aggregate(
+            [
+                {"$group": {"_id": "$height", "count": {"$sum": 1}}},
+            ]
+        )
+        assert aggregation.get_aggregation_pipeline() == [
+            {"$match": {"door.$id": door.id}},
+            {"$group": {"_id": "$height", "count": {"$sum": 1}}},
+        ]
+        result = await aggregation.to_list()
+        assert result == [{"_id": 0, "count": 1}]
+
+    async def test_find_aggregate_with_fetch_links(self, houses):
+        door = await Door.find_one()
+        aggregation = House.find(
+            House.door.id == door.id, fetch_links=True
+        ).aggregate(
+            [
+                {"$group": {"_id": "$height", "count": {"$sum": 1}}},
+            ]
+        )
+        assert len(aggregation.get_aggregation_pipeline()) == 12
+        assert aggregation.get_aggregation_pipeline()[10:] == [
+            {"$match": {"door._id": door.id}},
+            {"$group": {"_id": "$height", "count": {"$sum": 1}}},
+        ]
+        result = await aggregation.to_list()
+        assert result == [{"_id": 0, "count": 1}]

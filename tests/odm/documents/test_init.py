@@ -1,22 +1,24 @@
 import pytest
 from motor.motor_asyncio import AsyncIOMotorCollection
+from pymongo import IndexModel
 
-from beanie import Document, init_beanie, Indexed
+from beanie import Document, Indexed, init_beanie
 from beanie.exceptions import CollectionWasNotInitialized
 from beanie.odm.utils.projection import get_projection
 from tests.odm.models import (
+    Color,
     DocumentTestModel,
+    DocumentTestModelIndexFlagsAnnotated,
+    DocumentTestModelStringImport,
+    DocumentTestModelWithComplexIndex,
     DocumentTestModelWithCustomCollectionName,
+    DocumentTestModelWithDroppedIndex,
+    DocumentTestModelWithIndexFlags,
     DocumentTestModelWithIndexFlagsAliases,
     DocumentTestModelWithSimpleIndex,
-    DocumentTestModelWithIndexFlags,
-    DocumentTestModelWithComplexIndex,
-    DocumentTestModelStringImport,
-    DocumentTestModelWithDroppedIndex,
-    DocumentWithIndexMerging2,
     DocumentWithCustomInit,
+    DocumentWithIndexMerging2,
 )
-from pymongo import IndexModel
 
 
 async def test_init_collection_was_not_initialized():
@@ -109,6 +111,33 @@ async def test_flagged_index_creation_with_alias():
         "unique": True,
         "v": 2,
     }
+
+
+async def test_annotated_index_creation():
+    collection: AsyncIOMotorCollection = (
+        DocumentTestModelIndexFlagsAnnotated.get_motor_collection()
+    )
+    index_info = await collection.index_information()
+    assert index_info["str_index_text"]["key"] == [
+        ("_fts", "text"),
+        ("_ftsx", 1),
+    ]
+    assert index_info["str_index_annotated_1"] == {
+        "key": [("str_index_annotated", 1)],
+        "v": 2,
+    }
+
+    assert index_info["uuid_index_annotated_1"] == {
+        "key": [("uuid_index_annotated", 1)],
+        "unique": True,
+        "v": 2,
+    }
+    if "uuid_index" in index_info:
+        assert index_info["uuid_index"] == {
+            "key": [("uuid_index", 1)],
+            "unique": True,
+            "v": 2,
+        }
 
 
 async def test_complex_index_creation():
@@ -289,3 +318,20 @@ async def test_merge_indexes():
 
 async def test_custom_init():
     assert DocumentWithCustomInit.s == "TEST2"
+
+
+async def test_index_on_custom_types(db):
+    class Sample1(Document):
+        name: Indexed(Color, unique=True)
+
+        class Settings:
+            name = "sample"
+
+    await db.drop_collection("sample")
+
+    await init_beanie(
+        database=db,
+        document_models=[Sample1],
+    )
+
+    await db.drop_collection("sample")

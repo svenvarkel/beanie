@@ -1,7 +1,7 @@
 from typing import (
-    Callable,
     TYPE_CHECKING,
     Any,
+    Callable,
     Coroutine,
     Dict,
     Generator,
@@ -18,14 +18,13 @@ from typing import (
 )
 
 from pydantic import BaseModel
+from pymongo import ReplaceOne
 from pymongo.client_session import ClientSession
 from pymongo.results import UpdateResult
 
-from pymongo import ReplaceOne
-
 from beanie.exceptions import DocumentNotFound
-from beanie.odm.cache import LRUCache
 from beanie.odm.bulk import BulkWriter, Operation
+from beanie.odm.cache import LRUCache
 from beanie.odm.enums import SortDirection
 from beanie.odm.interfaces.aggregation_methods import AggregateMethods
 from beanie.odm.interfaces.clone import CloneInterface
@@ -39,14 +38,14 @@ from beanie.odm.queries.delete import (
     DeleteOne,
 )
 from beanie.odm.queries.update import (
-    UpdateQuery,
     UpdateMany,
     UpdateOne,
+    UpdateQuery,
     UpdateResponse,
 )
 from beanie.odm.utils.dump import get_dict
 from beanie.odm.utils.encoder import Encoder
-from beanie.odm.utils.find import construct_lookup_queries
+from beanie.odm.utils.find import construct_lookup_queries, split_text_query
 from beanie.odm.utils.parsing import parse_obj
 from beanie.odm.utils.projection import get_projection
 from beanie.odm.utils.relations import convert_ids
@@ -63,11 +62,6 @@ class FindQuery(
 ):
     """
     Find Query base class
-
-    Inherited from:
-
-    - [SessionMethods](https://roman-right.github.io/beanie/api/interfaces/#sessionmethods)
-    - [UpdateMethods](https://roman-right.github.io/beanie/api/interfaces/#aggregatemethods)
     """
 
     UpdateQueryType: Union[
@@ -89,13 +83,15 @@ class FindQuery(
         self.fetch_links: bool = False
         self.pymongo_kwargs: Dict[str, Any] = {}
         self.lazy_parse = False
+        self.nesting_depth: Optional[int] = None
+        self.nesting_depths_per_field: Optional[Dict[str, int]] = None
 
     def prepare_find_expressions(self):
         if self.document_model.get_link_fields() is not None:
             for i, query in enumerate(self.find_expressions):
                 self.find_expressions[i] = convert_ids(
                     query,
-                    doc=self.document_model,
+                    doc=self.document_model,  # type: ignore
                     fetch_links=self.fetch_links,
                 )
 
@@ -173,13 +169,6 @@ class FindMany(
 ):
     """
     Find Many query class
-
-    Inherited from:
-
-    - [FindQuery](https://roman-right.github.io/beanie/api/queries/#findquery)
-    - [BaseCursorQuery](https://roman-right.github.io/beanie/api/queries/#basecursorquery) - async generator
-    - [AggregateMethods](https://roman-right.github.io/beanie/api/interfaces/#aggregatemethods)
-
     """
 
     UpdateQueryType = UpdateMany
@@ -203,6 +192,8 @@ class FindMany(
         ignore_cache: bool = False,
         fetch_links: bool = False,
         lazy_parse: bool = False,
+        nesting_depth: Optional[int] = None,
+        nesting_depths_per_field: Optional[Dict[str, int]] = None,
         **pymongo_kwargs,
     ) -> "FindMany[FindQueryResultType]":
         ...
@@ -219,6 +210,8 @@ class FindMany(
         ignore_cache: bool = False,
         fetch_links: bool = False,
         lazy_parse: bool = False,
+        nesting_depth: Optional[int] = None,
+        nesting_depths_per_field: Optional[Dict[str, int]] = None,
         **pymongo_kwargs,
     ) -> "FindMany[FindQueryProjectionType]":
         ...
@@ -234,6 +227,8 @@ class FindMany(
         ignore_cache: bool = False,
         fetch_links: bool = False,
         lazy_parse: bool = False,
+        nesting_depth: Optional[int] = None,
+        nesting_depths_per_field: Optional[Dict[str, int]] = None,
         **pymongo_kwargs,
     ) -> Union[
         "FindMany[FindQueryResultType]", "FindMany[FindQueryProjectionType]"
@@ -262,6 +257,8 @@ class FindMany(
         self.ignore_cache = ignore_cache
         self.fetch_links = fetch_links
         self.pymongo_kwargs.update(pymongo_kwargs)
+        self.nesting_depth = nesting_depth
+        self.nesting_depths_per_field = nesting_depths_per_field
         if lazy_parse is True:
             self.lazy_parse = lazy_parse
         return self
@@ -310,6 +307,8 @@ class FindMany(
         ignore_cache: bool = False,
         fetch_links: bool = False,
         lazy_parse: bool = False,
+        nesting_depth: Optional[int] = None,
+        nesting_depths_per_field: Optional[Dict[str, int]] = None,
         **pymongo_kwargs,
     ) -> "FindMany[FindQueryResultType]":
         ...
@@ -326,6 +325,8 @@ class FindMany(
         ignore_cache: bool = False,
         fetch_links: bool = False,
         lazy_parse: bool = False,
+        nesting_depth: Optional[int] = None,
+        nesting_depths_per_field: Optional[Dict[str, int]] = None,
         **pymongo_kwargs,
     ) -> "FindMany[FindQueryProjectionType]":
         ...
@@ -341,6 +342,8 @@ class FindMany(
         ignore_cache: bool = False,
         fetch_links: bool = False,
         lazy_parse: bool = False,
+        nesting_depth: Optional[int] = None,
+        nesting_depths_per_field: Optional[Dict[str, int]] = None,
         **pymongo_kwargs,
     ) -> Union[
         "FindMany[FindQueryResultType]", "FindMany[FindQueryProjectionType]"
@@ -358,6 +361,8 @@ class FindMany(
             ignore_cache=ignore_cache,
             fetch_links=fetch_links,
             lazy_parse=lazy_parse,
+            nesting_depth=nesting_depth,
+            nesting_depths_per_field=nesting_depths_per_field,
             **pymongo_kwargs,
         )
 
@@ -487,11 +492,11 @@ class FindMany(
     ) -> UpdateMany:
         """
         Provide search criteria to the
-        [UpdateMany](https://roman-right.github.io/beanie/api/queries/#updatemany) query
+        [UpdateMany](query.md#updatemany) query
 
         :param args: *Mapping[str,Any] - the modifications to apply.
         :param session: Optional[ClientSession]
-        :return: [UpdateMany](https://roman-right.github.io/beanie/api/queries/#updatemany) query
+        :return: [UpdateMany](query.md#updatemany) query
         """
         return cast(
             UpdateMany,
@@ -510,10 +515,10 @@ class FindMany(
         **pymongo_kwargs,
     ) -> DeleteMany:
         """
-        Provide search criteria to the [DeleteMany](https://roman-right.github.io/beanie/api/queries/#deletemany) query
+        Provide search criteria to the [DeleteMany](query.md#deletemany) query
 
         :param session:
-        :return: [DeleteMany](https://roman-right.github.io/beanie/api/queries/#deletemany) query
+        :return: [DeleteMany](query.md#deletemany) query
         """
         # We need to cast here to tell mypy that we are sure about the type.
         # This is because delete may also return a DeleteOne type in general, and mypy can not be sure in this case
@@ -559,28 +564,21 @@ class FindMany(
         AggregationQuery[FindQueryProjectionType],
     ]:
         """
-        Provide search criteria to the [AggregationQuery](https://roman-right.github.io/beanie/api/queries/#aggregationquery)
+        Provide search criteria to the [AggregationQuery](query.md#aggregationquery)
 
         :param aggregation_pipeline: list - aggregation pipeline. MongoDB doc:
         <https://docs.mongodb.com/manual/core/aggregation-pipeline/>
         :param projection_model: Type[BaseModel] - Projection Model
         :param session: Optional[ClientSession] - PyMongo session
         :param ignore_cache: bool
-        :return:[AggregationQuery](https://roman-right.github.io/beanie/api/queries/#aggregationquery)
+        :return:[AggregationQuery](query.md#aggregationquery)
         """
         self.set_session(session=session)
-        find_query = self.get_filter_query()
-        if self.fetch_links:
-            find_aggregation_pipeline = self.build_aggregation_pipeline()
-            aggregation_pipeline = (
-                find_aggregation_pipeline + aggregation_pipeline
-            )
-            find_query = {}
         return self.AggregationQueryType(
-            aggregation_pipeline=aggregation_pipeline,
-            document_model=self.document_model,
+            self.document_model,
+            self.build_aggregation_pipeline(*aggregation_pipeline),
+            find_query={},
             projection_model=projection_model,
-            find_query=find_query,
             ignore_cache=ignore_cache,
             **pymongo_kwargs,
         ).set_session(session=self.session)
@@ -618,13 +616,47 @@ class FindMany(
                 self._cache_key, data
             )
 
-    def build_aggregation_pipeline(self):
-        aggregation_pipeline: List[Dict[str, Any]] = construct_lookup_queries(
-            self.document_model
-        )
+    def build_aggregation_pipeline(self, *extra_stages):
+        if self.fetch_links:
+            aggregation_pipeline: List[
+                Dict[str, Any]
+            ] = construct_lookup_queries(
+                self.document_model,
+                nesting_depth=self.nesting_depth,
+                nesting_depths_per_field=self.nesting_depths_per_field,
+            )
+        else:
+            aggregation_pipeline = []
+        filter_query = self.get_filter_query()
 
-        aggregation_pipeline.append({"$match": self.get_filter_query()})
+        if filter_query:
+            text_queries, non_text_queries = split_text_query(filter_query)
 
+            if text_queries:
+                aggregation_pipeline.insert(
+                    0,
+                    {
+                        "$match": (
+                            {"$and": text_queries}
+                            if len(text_queries) > 1
+                            else text_queries[0]
+                        )
+                    },
+                )
+
+            if non_text_queries:
+                aggregation_pipeline.append(
+                    {
+                        "$match": (
+                            {"$and": non_text_queries}
+                            if len(non_text_queries) > 1
+                            else non_text_queries[0]
+                        )
+                    }
+                )
+
+        if extra_stages:
+            aggregation_pipeline.extend(extra_stages)
         sort_pipeline = {"$sort": {i[0]: i[1] for i in self.sort_expressions}}
         if sort_pipeline["$sort"]:
             aggregation_pipeline.append(sort_pipeline)
@@ -679,14 +711,7 @@ class FindMany(
         if self.fetch_links:
             aggregation_pipeline: List[
                 Dict[str, Any]
-            ] = construct_lookup_queries(self.document_model)
-
-            aggregation_pipeline.append({"$match": self.get_filter_query()})
-
-            if self.skip_number != 0:
-                aggregation_pipeline.append({"$skip": self.skip_number})
-            if self.limit_number != 0:
-                aggregation_pipeline.append({"$limit": self.limit_number})
+            ] = self.build_aggregation_pipeline()
 
             aggregation_pipeline.append({"$count": "count"})
 
@@ -708,10 +733,6 @@ class FindMany(
 class FindOne(FindQuery[FindQueryResultType]):
     """
     Find One query class
-
-    Inherited from:
-
-    - [FindQuery](https://roman-right.github.io/beanie/api/queries/#findquery)
     """
 
     UpdateQueryType = UpdateOne
@@ -756,6 +777,8 @@ class FindOne(FindQuery[FindQueryResultType]):
         session: Optional[ClientSession] = None,
         ignore_cache: bool = False,
         fetch_links: bool = False,
+        nesting_depth: Optional[int] = None,
+        nesting_depths_per_field: Optional[Dict[str, int]] = None,
         **pymongo_kwargs,
     ) -> "FindOne[FindQueryResultType]":
         ...
@@ -768,6 +791,8 @@ class FindOne(FindQuery[FindQueryResultType]):
         session: Optional[ClientSession] = None,
         ignore_cache: bool = False,
         fetch_links: bool = False,
+        nesting_depth: Optional[int] = None,
+        nesting_depths_per_field: Optional[Dict[str, int]] = None,
         **pymongo_kwargs,
     ) -> "FindOne[FindQueryProjectionType]":
         ...
@@ -779,6 +804,8 @@ class FindOne(FindQuery[FindQueryResultType]):
         session: Optional[ClientSession] = None,
         ignore_cache: bool = False,
         fetch_links: bool = False,
+        nesting_depth: Optional[int] = None,
+        nesting_depths_per_field: Optional[Dict[str, int]] = None,
         **pymongo_kwargs,
     ) -> Union[
         "FindOne[FindQueryResultType]", "FindOne[FindQueryProjectionType]"
@@ -799,6 +826,8 @@ class FindOne(FindQuery[FindQueryResultType]):
         self.ignore_cache = ignore_cache
         self.fetch_links = fetch_links
         self.pymongo_kwargs.update(pymongo_kwargs)
+        self.nesting_depth = nesting_depth
+        self.nesting_depths_per_field = nesting_depths_per_field
         return self
 
     def update(
@@ -877,12 +906,12 @@ class FindOne(FindQuery[FindQueryResultType]):
         **pymongo_kwargs,
     ) -> UpdateOne:
         """
-        Create [UpdateOne](https://roman-right.github.io/beanie/api/queries/#updateone) query using modifications and
+        Create [UpdateOne](query.md#updateone) query using modifications and
         provide search criteria there
         :param args: *Mapping[str,Any] - the modifications to apply
         :param session: Optional[ClientSession] - PyMongo sessions
         :param response_type: Optional[UpdateResponse]
-        :return: [UpdateOne](https://roman-right.github.io/beanie/api/queries/#updateone) query
+        :return: [UpdateOne](query.md#updateone) query
         """
         return cast(
             UpdateOne,
@@ -902,9 +931,9 @@ class FindOne(FindQuery[FindQueryResultType]):
         **pymongo_kwargs,
     ) -> DeleteOne:
         """
-        Provide search criteria to the [DeleteOne](https://roman-right.github.io/beanie/api/queries/#deleteone) query
+        Provide search criteria to the [DeleteOne](query.md#deleteone) query
         :param session: Optional[ClientSession] - PyMongo sessions
-        :return: [DeleteOne](https://roman-right.github.io/beanie/api/queries/#deleteone) query
+        :return: [DeleteOne](query.md#deleteone) query
         """
         # We need to cast here to tell mypy that we are sure about the type.
         # This is because delete may also return a DeleteOne type in general, and mypy can not be sure in this case
@@ -952,9 +981,12 @@ class FindOne(FindQuery[FindQueryResultType]):
                 Operation(
                     operation=ReplaceOne,
                     first_query=self.get_filter_query(),
-                    second_query=Encoder(
-                        by_alias=True, exclude={"_id"}
-                    ).encode(document),
+                    second_query=get_dict(
+                        document,
+                        to_db=True,
+                        exclude={"_id"},
+                        keep_nulls=document.get_settings().keep_nulls,
+                    ),
                     object_class=self.document_model,
                     pymongo_kwargs=self.pymongo_kwargs,
                 )
@@ -968,6 +1000,8 @@ class FindOne(FindQuery[FindQueryResultType]):
                 session=self.session,
                 fetch_links=self.fetch_links,
                 projection_model=self.projection_model,
+                nesting_depth=self.nesting_depth,
+                nesting_depths_per_field=self.nesting_depths_per_field,
                 **self.pymongo_kwargs,
             ).first_or_none()
         return await self.document_model.get_motor_collection().find_one(

@@ -3,15 +3,15 @@ import inspect
 from enum import Enum
 from functools import wraps
 from typing import (
-    Callable,
-    List,
-    Union,
-    Dict,
     TYPE_CHECKING,
-    Type,
+    Any,
+    Callable,
+    Dict,
+    List,
     Optional,
     Tuple,
-    Any,
+    Type,
+    Union,
 )
 
 if TYPE_CHECKING:
@@ -206,7 +206,6 @@ def wrap_with_actions(event_type: EventTypes):
             skip_actions: Optional[List[Union[ActionDirections, str]]] = None,
             **kwargs,
         ):
-
             if skip_actions is None:
                 skip_actions = []
 

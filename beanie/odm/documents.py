@@ -1,26 +1,27 @@
 import asyncio
-from typing import ClassVar, AbstractSet
+import warnings
+from enum import Enum
 from typing import (
-    Dict,
-    Optional,
-    List,
-    Type,
-    Union,
-    Mapping,
-    TypeVar,
     Any,
-    Set,
+    ClassVar,
+    Dict,
+    Iterable,
+    List,
+    Mapping,
+    Optional,
+    Type,
+    TypeVar,
+    Union,
 )
-from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
-from bson import ObjectId, DBRef
+from bson import DBRef, ObjectId
 from lazy_model import LazyModel
 from pydantic import (
-    ValidationError,
-    PrivateAttr,
+    ConfigDict,
     Field,
-    parse_obj_as,
+    PrivateAttr,
+    ValidationError,
 )
 from pydantic.class_validators import root_validator
 from pydantic.main import BaseModel
@@ -35,27 +36,27 @@ from pymongo.results import (
 from beanie.exceptions import (
     CollectionWasNotInitialized,
     DocumentNotFound,
-    RevisionIdWasChanged,
     DocumentWasNotSaved,
     NotSupported,
     ReplaceError,
+    RevisionIdWasChanged,
 )
 from beanie.odm.actions import (
+    ActionDirections,
     EventTypes,
     wrap_with_actions,
-    ActionDirections,
 )
 from beanie.odm.bulk import BulkWriter, Operation
 from beanie.odm.cache import LRUCache
 from beanie.odm.fields import (
-    PydanticObjectId,
+    BackLink,
+    DeleteRules,
     ExpressionField,
     Link,
     LinkInfo,
     LinkTypes,
+    PydanticObjectId,
     WriteRules,
-    DeleteRules,
-    BackLink,
 )
 from beanie.odm.interfaces.aggregate import AggregateInterface
 from beanie.odm.interfaces.detector import ModelType
@@ -64,35 +65,71 @@ from beanie.odm.interfaces.getters import OtherGettersInterface
 from beanie.odm.interfaces.inheritance import InheritanceInterface
 from beanie.odm.interfaces.setters import SettersInterface
 from beanie.odm.models import (
+    InspectionError,
     InspectionResult,
     InspectionStatuses,
-    InspectionError,
 )
 from beanie.odm.operators.find.comparison import In
 from beanie.odm.operators.update.general import (
     CurrentDate,
     Inc,
-    Set as SetOperator,
-    Unset,
     SetRevisionId,
+    Unset,
+)
+from beanie.odm.operators.update.general import (
+    Set as SetOperator,
 )
 from beanie.odm.queries.update import UpdateMany, UpdateResponse
 from beanie.odm.settings.document import DocumentSettings
 from beanie.odm.utils.dump import get_dict, get_top_level_nones
-from beanie.odm.utils.parsing import merge_models
+from beanie.odm.utils.parsing import apply_changes, merge_models
+from beanie.odm.utils.pydantic import (
+    IS_PYDANTIC_V2,
+    get_extra_field_info,
+    get_field_type,
+    get_model_dump,
+    get_model_fields,
+    parse_model,
+    parse_object_as,
+)
 from beanie.odm.utils.self_validation import validate_self_before
 from beanie.odm.utils.state import (
-    saved_state_needed,
     previous_saved_state_needed,
     save_state_after,
-    swap_revision_after,
+    saved_state_needed,
 )
+from beanie.odm.utils.typing import extract_id_class
 
-if TYPE_CHECKING:
-    from pydantic.typing import AbstractSetIntStr, MappingIntStrAny, DictStrAny
+if IS_PYDANTIC_V2:
+    from pydantic import model_validator
 
 DocType = TypeVar("DocType", bound="Document")
 DocumentProjectionType = TypeVar("DocumentProjectionType", bound=BaseModel)
+
+
+def json_schema_extra(schema: Dict[str, Any], model: Type["Document"]) -> None:
+    # remove excluded fields from the json schema
+    properties = schema.get("properties")
+    if not properties:
+        return
+    for k, field in get_model_fields(model).items():
+        k = field.alias or k
+        if k not in properties:
+            continue
+        field_info = field if IS_PYDANTIC_V2 else field.field_info
+        if field_info.exclude:
+            del properties[k]
+
+
+def document_alias_generator(s: str) -> str:
+    if s == "id":
+        return "_id"
+    return s
+
+
+class MergeStrategy(str, Enum):
+    local = "local"
+    remote = "remote"
 
 
 class Document(
@@ -110,18 +147,28 @@ class Document(
 
     - `id` - MongoDB document ObjectID "_id" field.
     Mapped to the PydanticObjectId class
-
-    Inherited from:
-
-    - Pydantic BaseModel
-    - [UpdateMethods](https://roman-right.github.io/beanie/api/interfaces/#aggregatemethods)
     """
 
-    id: Optional[PydanticObjectId] = None
+    if IS_PYDANTIC_V2:
+        model_config = ConfigDict(
+            json_schema_extra=json_schema_extra,
+            populate_by_name=True,
+            alias_generator=document_alias_generator,
+        )
+    else:
+
+        class Config:
+            json_encoders = {ObjectId: str}
+            allow_population_by_field_name = True
+            fields = {"id": "_id"}
+            schema_extra = staticmethod(json_schema_extra)
+
+    id: Optional[PydanticObjectId] = Field(
+        default=None, description="MongoDB document ObjectID"
+    )
 
     # State
-    revision_id: Optional[UUID] = Field(default=None, hidden=True)
-    _previous_revision_id: Optional[UUID] = PrivateAttr(default=None)
+    revision_id: Optional[UUID] = Field(default=None, exclude=True)
     _saved_state: Optional[Dict[str, Any]] = PrivateAttr(default=None)
     _previous_saved_state: Optional[Dict[str, Any]] = PrivateAttr(default=None)
 
@@ -137,20 +184,12 @@ class Document(
     # Database
     _database_major_version: ClassVar[int] = 4
 
-    # Other
-    _hidden_fields: ClassVar[Set[str]] = set()
-
-    def _swap_revision(self):
-        if self.get_settings().use_revision:
-            self._previous_revision_id = self.revision_id
-            self.revision_id = uuid4()
-
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         super(Document, self).__init__(*args, **kwargs)
         self.get_motor_collection()
 
-    @root_validator(pre=True)
-    def fill_back_refs(cls, values):
+    @classmethod
+    def _fill_back_refs(cls, values):
         if cls._link_fields:
             for field_name, link_info in cls._link_fields.items():
                 if (
@@ -158,8 +197,8 @@ class Document(
                     in [LinkTypes.BACK_DIRECT, LinkTypes.OPTIONAL_BACK_DIRECT]
                     and field_name not in values
                 ):
-                    values[field_name] = BackLink[link_info.model_class](
-                        link_info.model_class
+                    values[field_name] = BackLink[link_info.document_class](
+                        link_info.document_class
                     )
                 if (
                     link_info.link_type
@@ -167,9 +206,23 @@ class Document(
                     and field_name not in values
                 ):
                     values[field_name] = [
-                        BackLink[link_info.model_class](link_info.model_class)
+                        BackLink[link_info.document_class](
+                            link_info.document_class
+                        )
                     ]
         return values
+
+    if IS_PYDANTIC_V2:
+
+        @model_validator(mode="before")
+        def fill_back_refs(cls, values):
+            return cls._fill_back_refs(values)
+
+    else:
+
+        @root_validator(pre=True)
+        def fill_back_refs(cls, values):
+            return cls._fill_back_refs(values)
 
     @classmethod
     async def get(
@@ -179,6 +232,8 @@ class Document(
         ignore_cache: bool = False,
         fetch_links: bool = False,
         with_children: bool = False,
+        nesting_depth: Optional[int] = None,
+        nesting_depths_per_field: Optional[Dict[str, int]] = None,
         **pymongo_kwargs,
     ) -> Optional["DocType"]:
         """
@@ -190,8 +245,13 @@ class Document(
         :param **pymongo_kwargs: pymongo native parameters for find operation
         :return: Union["Document", None]
         """
-        if not isinstance(document_id, cls.__fields__["id"].type_):
-            document_id = parse_obj_as(cls.__fields__["id"].type_, document_id)
+        if not isinstance(
+            document_id,
+            extract_id_class(get_field_type(get_model_fields(cls)["id"])),
+        ):
+            document_id = parse_object_as(
+                get_field_type(get_model_fields(cls)["id"]), document_id
+            )
 
         return await cls.find_one(
             {"_id": document_id},
@@ -199,12 +259,48 @@ class Document(
             ignore_cache=ignore_cache,
             fetch_links=fetch_links,
             with_children=with_children,
+            nesting_depth=nesting_depth,
+            nesting_depths_per_field=nesting_depths_per_field,
             **pymongo_kwargs,
         )
 
+    async def sync(self, merge_strategy: MergeStrategy = MergeStrategy.remote):
+        """
+        Sync the document with the database
+
+        :param merge_strategy: MergeStrategy - how to merge the document
+        :return: None
+        """
+        if (
+            merge_strategy == MergeStrategy.local
+            and self.get_settings().use_state_management is False
+        ):
+            raise ValueError(
+                "State management must be turned on to use local merge strategy"
+            )
+        if self.id is None:
+            raise DocumentWasNotSaved
+        document = await self.find_one({"_id": self.id})
+        if document is None:
+            raise DocumentNotFound
+
+        if merge_strategy == MergeStrategy.local:
+            original_changes = self.get_changes()
+            new_state = document.get_saved_state()
+            if new_state is None:
+                raise DocumentWasNotSaved
+            changes_to_apply = self._collect_updates(
+                new_state, original_changes
+            )
+            merge_models(self, document)
+            apply_changes(changes_to_apply, self)
+        elif merge_strategy == MergeStrategy.remote:
+            merge_models(self, document)
+        else:
+            raise ValueError("Invalid merge strategy")
+
     @wrap_with_actions(EventTypes.INSERT)
     @save_state_after
-    @swap_revision_after
     @validate_self_before
     async def insert(
         self: DocType,
@@ -235,10 +331,13 @@ class Document(
                         LinkTypes.OPTIONAL_LIST,
                     ]:
                         if isinstance(value, List):
-                            for obj in value:
-                                if isinstance(obj, Document):
-                                    await obj.save(link_rule=WriteRules.WRITE)
-
+                            await asyncio.gather(
+                                *[
+                                    obj.save(link_rule=WriteRules.WRITE)
+                                    for obj in value
+                                    if isinstance(obj, Document)
+                                ]
+                            )
         result = await self.get_motor_collection().insert_one(
             get_dict(
                 self, to_db=True, keep_nulls=self.get_settings().keep_nulls
@@ -246,8 +345,13 @@ class Document(
             session=session,
         )
         new_id = result.inserted_id
-        if not isinstance(new_id, self.__fields__["id"].type_):
-            new_id = parse_obj_as(self.__fields__["id"].type_, new_id)
+        if not isinstance(
+            new_id,
+            extract_id_class(get_field_type(get_model_fields(self)["id"])),
+        ):
+            new_id = parse_object_as(
+                get_field_type(get_model_fields(self)["id"]), new_id
+            )
         self.id = new_id
         return self
 
@@ -304,12 +408,11 @@ class Document(
     @classmethod
     async def insert_many(
         cls: Type[DocType],
-        documents: List[DocType],
+        documents: Iterable[DocType],
         session: Optional[ClientSession] = None,
         link_rule: WriteRules = WriteRules.DO_NOTHING,
         **pymongo_kwargs,
     ) -> InsertManyResult:
-
         """
         Insert many documents to the collection
 
@@ -336,7 +439,6 @@ class Document(
 
     @wrap_with_actions(EventTypes.REPLACE)
     @save_state_after
-    @swap_revision_after
     @validate_self_before
     async def replace(
         self: DocType,
@@ -386,20 +488,25 @@ class Document(
                         LinkTypes.OPTIONAL_BACK_LIST,
                     ]:
                         if isinstance(value, List):
-                            for obj in value:
-                                if isinstance(obj, Document):
-                                    await obj.replace(
+                            await asyncio.gather(
+                                *[
+                                    obj.replace(
                                         link_rule=link_rule,
                                         bulk_writer=bulk_writer,
                                         ignore_revision=ignore_revision,
                                         session=session,
                                     )
+                                    for obj in value
+                                    if isinstance(obj, Document)
+                                ]
+                            )
 
         use_revision_id = self.get_settings().use_revision
         find_query: Dict[str, Any] = {"_id": self.id}
 
         if use_revision_id and not ignore_revision:
-            find_query["revision_id"] = self._previous_revision_id
+            find_query["revision_id"] = self.revision_id
+            self.revision_id = uuid4()
         try:
             await self.find_one(find_query).replace_one(
                 self,
@@ -415,6 +522,7 @@ class Document(
 
     @wrap_with_actions(EventTypes.SAVE)
     @save_state_after
+    @validate_self_before
     async def save(
         self: DocType,
         session: Optional[ClientSession] = None,
@@ -453,11 +561,15 @@ class Document(
                         LinkTypes.OPTIONAL_BACK_LIST,
                     ]:
                         if isinstance(value, List):
-                            for obj in value:
-                                if isinstance(obj, Document):
-                                    await obj.save(
+                            await asyncio.gather(
+                                *[
+                                    obj.save(
                                         link_rule=link_rule, session=session
                                     )
+                                    for obj in value
+                                    if isinstance(obj, Document)
+                                ]
+                            )
 
         if self.get_settings().keep_nulls is False:
             return await self.update(
@@ -572,7 +684,6 @@ class Document(
         :param pymongo_kwargs: pymongo native parameters for update operation
         :return: None
         """
-
         arguments = list(args)
 
         if skip_sync is not None:
@@ -587,10 +698,11 @@ class Document(
             find_query = {"_id": PydanticObjectId()}
 
         if use_revision_id and not ignore_revision:
-            find_query["revision_id"] = self._previous_revision_id
+            find_query["revision_id"] = self.revision_id
 
         if use_revision_id:
-            arguments.append(SetRevisionId(self.revision_id))
+            new_revision_id = uuid4()
+            arguments.append(SetRevisionId(new_revision_id))
         try:
             result = await self.find_one(find_query).update(
                 *arguments,
@@ -650,7 +762,7 @@ class Document(
 
         ```
 
-        Uses [Set operator](https://roman-right.github.io/beanie/api/operators/update/#set)
+        Uses [Set operator](operators/update.md#set)
 
         :param expression: Dict[Union[ExpressionField, str], Any] - keys and
         values to set
@@ -678,7 +790,7 @@ class Document(
         """
         Set current date
 
-        Uses [CurrentDate operator](https://roman-right.github.io/beanie/api/operators/update/#currentdate)
+        Uses [CurrentDate operator](operators/update.md#currentdate)
 
         :param expression: Dict[Union[ExpressionField, str], Any]
         :param session: Optional[ClientSession] - pymongo session
@@ -716,7 +828,7 @@ class Document(
 
         ```
 
-        Uses [Inc operator](https://roman-right.github.io/beanie/api/operators/update/#inc)
+        Uses [Inc operator](operators/update.md#inc)
 
         :param expression: Dict[Union[ExpressionField, str], Any]
         :param session: Optional[ClientSession] - pymongo session
@@ -774,12 +886,16 @@ class Document(
                         LinkTypes.OPTIONAL_BACK_LIST,
                     ]:
                         if isinstance(value, List):
-                            for obj in value:
-                                if isinstance(obj, Document):
-                                    await obj.delete(
+                            await asyncio.gather(
+                                *[
+                                    obj.delete(
                                         link_rule=DeleteRules.DELETE_LINKS,
                                         **pymongo_kwargs,
                                     )
+                                    for obj in value
+                                    if isinstance(obj, Document)
+                                ]
+                            )
 
         return await self.find_one({"_id": self.id}).delete(
             session=session, bulk_writer=bulk_writer, **pymongo_kwargs
@@ -840,7 +956,10 @@ class Document(
                 self._previous_saved_state = self._saved_state
 
             self._saved_state = get_dict(
-                self, to_db=True, keep_nulls=self.get_settings().keep_nulls
+                self,
+                to_db=True,
+                keep_nulls=self.get_settings().keep_nulls,
+                exclude={"revision_id"},
             )
 
     def get_saved_state(self) -> Optional[Dict[str, Any]]:
@@ -861,7 +980,10 @@ class Document(
     @saved_state_needed
     def is_changed(self) -> bool:
         if self._saved_state == get_dict(
-            self, to_db=True, keep_nulls=self.get_settings().keep_nulls
+            self,
+            to_db=True,
+            keep_nulls=self.get_settings().keep_nulls,
+            exclude={"revision_id"},
         ):
             return False
         return True
@@ -904,7 +1026,6 @@ class Document(
                         elif isinstance(field_value, dict) and isinstance(
                             old_dict.get(field_name), dict
                         ):
-
                             field_data = self._collect_updates(
                                 old_dict.get(field_name),  # type: ignore
                                 field_value,
@@ -920,7 +1041,13 @@ class Document(
     @saved_state_needed
     def get_changes(self) -> Dict[str, Any]:
         return self._collect_updates(
-            self._saved_state, get_dict(self, to_db=True, keep_nulls=self.get_settings().keep_nulls)  # type: ignore
+            self._saved_state,  # type: ignore
+            get_dict(
+                self,
+                to_db=True,
+                keep_nulls=self.get_settings().keep_nulls,
+                exclude={"revision_id"},
+            ),
         )
 
     @saved_state_needed
@@ -930,7 +1057,8 @@ class Document(
             return {}
 
         return self._collect_updates(
-            self._previous_saved_state, self._saved_state  # type: ignore
+            self._previous_saved_state,
+            self._saved_state,  # type: ignore
         )
 
     @saved_state_needed
@@ -971,7 +1099,7 @@ class Document(
             {}, session=session
         ):
             try:
-                cls.parse_obj(json_document)
+                parse_model(cls, json_document)
             except ValidationError as e:
                 if inspection_result.status == InspectionStatuses.OK:
                     inspection_result.status = InspectionStatuses.FAIL
@@ -983,59 +1111,35 @@ class Document(
         return inspection_result
 
     @classmethod
-    def get_hidden_fields(cls):
-        return set(
-            attribute_name
-            for attribute_name, model_field in cls.__fields__.items()
-            if model_field.field_info.extra.get("hidden") is True
+    def check_hidden_fields(cls):
+        hidden_fields = [
+            (name, field)
+            for name, field in get_model_fields(cls).items()
+            if get_extra_field_info(field, "hidden") is True
+        ]
+        if not hidden_fields:
+            return
+        warnings.warn(
+            f"{cls.__name__}: 'hidden=True' is deprecated, please use 'exclude=True'",
+            DeprecationWarning,
         )
-
-    def dict(
-        self,
-        *,
-        include: Union["AbstractSetIntStr", "MappingIntStrAny"] = None,
-        exclude: Union["AbstractSetIntStr", "MappingIntStrAny"] = None,
-        by_alias: bool = False,
-        skip_defaults: bool = False,
-        exclude_hidden: bool = True,
-        exclude_unset: bool = False,
-        exclude_defaults: bool = False,
-        exclude_none: bool = False,
-    ) -> "DictStrAny":
-        """
-        Overriding of the respective method from Pydantic
-        Hides fields, marked as "hidden
-        """
-        if exclude_hidden:
-            if isinstance(exclude, AbstractSet):
-                exclude = {*self._hidden_fields, *exclude}
-            elif isinstance(exclude, Mapping):
-                exclude = dict(
-                    {k: True for k in self._hidden_fields}, **exclude
-                )  # type: ignore
-            elif exclude is None:
-                exclude = self._hidden_fields
-
-        kwargs = {
-            "include": include,
-            "exclude": exclude,
-            "by_alias": by_alias,
-            "exclude_unset": exclude_unset,
-            "exclude_defaults": exclude_defaults,
-            "exclude_none": exclude_none,
-        }
-
-        # TODO: Remove this check when skip_defaults are no longer supported
-        if skip_defaults:
-            kwargs["skip_defaults"] = skip_defaults
-
-        return super().dict(**kwargs)
+        if IS_PYDANTIC_V2:
+            for name, field in hidden_fields:
+                field.exclude = True
+                del field.json_schema_extra["hidden"]
+            cls.model_rebuild(force=True)
+        else:
+            for name, field in hidden_fields:
+                field.field_info.exclude = True
+                del field.field_info.extra["hidden"]
+                cls.__exclude_fields__[name] = True
 
     @wrap_with_actions(event_type=EventTypes.VALIDATE_ON_SAVE)
     async def validate_self(self, *args, **kwargs):
         # TODO: it can be sync, but needs some actions controller improvements
         if self.get_settings().validate_on_save:
-            self.parse_obj(self)
+            new_model = parse_model(self.__class__, get_model_dump(self))
+            merge_models(self, new_model)
 
     def to_ref(self):
         if self.id is None:
@@ -1082,21 +1186,4 @@ class Document(
     @classmethod
     def link_from_id(cls, id: Any):
         ref = DBRef(id=id, collection=cls.get_collection_name())
-        return Link(ref, model_class=cls)
-
-    class Config:
-        json_encoders = {
-            ObjectId: lambda v: str(v),
-        }
-        allow_population_by_field_name = True
-        fields = {"id": "_id"}
-
-        @staticmethod
-        def schema_extra(
-            schema: Dict[str, Any], model: Type["Document"]
-        ) -> None:
-            props = {}
-            for k, v in schema.get("properties", {}).items():
-                if not v.get("hidden", False):
-                    props[k] = v
-            schema["properties"] = props
+        return Link(ref, document_class=cls)

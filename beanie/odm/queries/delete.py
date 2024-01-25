@@ -1,13 +1,13 @@
-from typing import Type, TYPE_CHECKING, Any, Mapping, Optional, Dict, Generator
+from typing import TYPE_CHECKING, Any, Dict, Generator, Mapping, Optional, Type
 
+from pymongo import DeleteMany as DeleteManyPyMongo
+from pymongo import DeleteOne as DeleteOnePyMongo
 from pymongo.client_session import ClientSession
 from pymongo.results import DeleteResult
 
 from beanie.odm.bulk import BulkWriter, Operation
 from beanie.odm.interfaces.clone import CloneInterface
 from beanie.odm.interfaces.session import SessionMethods
-from pymongo import DeleteOne as DeleteOnePyMongo
-from pymongo import DeleteMany as DeleteManyPyMongo
 
 if TYPE_CHECKING:
     from beanie.odm.documents import DocType
@@ -23,7 +23,7 @@ class DeleteQuery(SessionMethods, CloneInterface):
         document_model: Type["DocType"],
         find_query: Mapping[str, Any],
         bulk_writer: Optional[BulkWriter] = None,
-        **pymongo_kwargs
+        **pymongo_kwargs,
     ):
         self.document_model = document_model
         self.find_query = find_query
@@ -46,7 +46,7 @@ class DeleteMany(DeleteQuery):
                 .delete_many(
                     self.find_query,
                     session=self.session,
-                    **self.pymongo_kwargs
+                    **self.pymongo_kwargs,
                 )
                 .__await__()
             )
@@ -76,7 +76,7 @@ class DeleteOne(DeleteQuery):
                 .delete_one(
                     self.find_query,
                     session=self.session,
-                    **self.pymongo_kwargs
+                    **self.pymongo_kwargs,
                 )
                 .__await__()
             )

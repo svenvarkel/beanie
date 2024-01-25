@@ -1,29 +1,37 @@
-from typing import Any, Type, Union, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Dict, Type, Union
+
 from pydantic import BaseModel
 
 from beanie.exceptions import (
-    UnionHasNoRegisteredDocs,
+    ApplyChangesException,
     DocWasNotRegisteredInUnionClass,
+    UnionHasNoRegisteredDocs,
 )
 from beanie.odm.interfaces.detector import ModelType
+from beanie.odm.utils.pydantic import get_config_value, parse_model
 
 if TYPE_CHECKING:
     from beanie.odm.documents import Document
 
 
 def merge_models(left: BaseModel, right: BaseModel) -> None:
+    """
+    Merge two models
+    :param left: left model
+    :param right: right model
+    :return: None
+    """
     from beanie.odm.fields import Link
 
-    if hasattr(left, "_previous_revision_id") and hasattr(
-        right, "_previous_revision_id"
-    ):
-        left._previous_revision_id = right._previous_revision_id  # type: ignore
     for k, right_value in right.__iter__():
-        left_value = left.__getattribute__(k)
+        left_value = getattr(left, k)
         if isinstance(right_value, BaseModel) and isinstance(
             left_value, BaseModel
         ):
-            merge_models(left_value, right_value)
+            if get_config_value(left_value, "frozen"):
+                left.__setattr__(k, right_value)
+            else:
+                merge_models(left_value, right_value)
             continue
         if isinstance(right_value, list):
             links_found = False
@@ -33,15 +41,55 @@ def merge_models(left: BaseModel, right: BaseModel) -> None:
                     break
             if links_found:
                 continue
+            left.__setattr__(k, right_value)
         elif not isinstance(right_value, Link):
             left.__setattr__(k, right_value)
 
 
-def save_state_swap_revision(item: BaseModel):
+def apply_changes(
+    changes: Dict[str, Any], target: Union[BaseModel, Dict[str, Any]]
+):
+    for key, value in changes.items():
+        if "." in key:
+            key_parts = key.split(".")
+            current_target = target
+            try:
+                for part in key_parts[:-1]:
+                    if isinstance(current_target, dict):
+                        current_target = current_target[part]
+                    elif isinstance(current_target, BaseModel):
+                        current_target = getattr(current_target, part)
+                    else:
+                        raise ApplyChangesException(
+                            f"Unexpected type of target: {type(target)}"
+                        )
+                final_key = key_parts[-1]
+                if isinstance(current_target, dict):
+                    current_target[final_key] = value
+                elif isinstance(current_target, BaseModel):
+                    setattr(current_target, final_key, value)
+                else:
+                    raise ApplyChangesException(
+                        f"Unexpected type of target: {type(target)}"
+                    )
+            except (KeyError, AttributeError) as e:
+                raise ApplyChangesException(
+                    f"Failed to apply change for key '{key}': {e}"
+                )
+        else:
+            if isinstance(target, dict):
+                target[key] = value
+            elif isinstance(target, BaseModel):
+                setattr(target, key, value)
+            else:
+                raise ApplyChangesException(
+                    f"Unexpected type of target: {type(target)}"
+                )
+
+
+def save_state(item: BaseModel):
     if hasattr(item, "_save_state"):
         item._save_state()  # type: ignore
-    if hasattr(item, "_swap_revision"):
-        item._swap_revision()  # type: ignore
 
 
 def parse_obj(
@@ -95,6 +143,6 @@ def parse_obj(
         o = model.lazy_parse(data, {"_id"})  # type: ignore
         o._saved_state = {"_id": o.id}
         return o
-    result = model.parse_obj(data)
-    save_state_swap_revision(result)
+    result = parse_model(model, data)
+    save_state(result)
     return result

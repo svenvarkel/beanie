@@ -1,6 +1,5 @@
 import datetime
-import decimal
-from decimal import Decimal
+from enum import Enum
 from ipaddress import (
     IPv4Address,
     IPv4Interface,
@@ -10,36 +9,102 @@ from ipaddress import (
     IPv6Network,
 )
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple, Union, ClassVar
+from typing import (
+    Any,
+    Callable,
+    ClassVar,
+    Dict,
+    List,
+    Optional,
+    Set,
+    Tuple,
+    Union,
+)
 from uuid import UUID, uuid4
 
-import pydantic
 import pymongo
 from pydantic import (
+    UUID4,
     BaseModel,
-    Extra,
+    ConfigDict,
+    EmailStr,
     Field,
+    HttpUrl,
     PrivateAttr,
     SecretBytes,
     SecretStr,
-    condecimal,
 )
-from pydantic.color import Color
+from pydantic.fields import FieldInfo
+from pydantic_core import core_schema
 from pymongo import IndexModel
+from typing_extensions import Annotated
 
 from beanie import (
+    DecimalAnnotation,
     Document,
     Indexed,
     Insert,
     Replace,
+    Save,
     Update,
     ValidateOnSave,
-    Save,
 )
 from beanie.odm.actions import Delete, after_event, before_event
-from beanie.odm.fields import Link, PydanticObjectId, BackLink
+from beanie.odm.custom_types.bson.binary import BsonBinary
+from beanie.odm.fields import BackLink, Link, PydanticObjectId
 from beanie.odm.settings.timeseries import TimeSeriesConfig
 from beanie.odm.union_doc import UnionDoc
+from beanie.odm.utils.pydantic import IS_PYDANTIC_V2
+
+if IS_PYDANTIC_V2:
+    from pydantic import RootModel, validate_call
+
+
+class Color:
+    def __init__(self, value):
+        self.value = value
+
+    def as_rgb(self):
+        return self.value
+
+    def as_hex(self):
+        return self.value
+
+    @classmethod
+    def __get_validators__(cls):
+        yield cls.validate
+
+    @classmethod
+    def validate(cls, value):
+        if isinstance(value, Color):
+            return value
+        if isinstance(value, dict):
+            return Color(value["value"])
+        return Color(value)
+
+    @classmethod
+    def __get_pydantic_core_schema__(
+        cls,
+        _source_type: Any,
+        _handler: Callable[[Any], core_schema.CoreSchema],  # type: ignore
+    ) -> core_schema.CoreSchema:  # type: ignore
+        def validate(value, _: FieldInfo) -> Color:
+            if isinstance(value, Color):
+                return value
+            if isinstance(value, dict):
+                return Color(value["value"])
+            return Color(value)
+
+        python_schema = core_schema.general_plain_validator_function(validate)
+
+        return core_schema.json_or_python_schema(
+            json_schema=core_schema.str_schema(),
+            python_schema=python_schema,
+        )
+
+
+class Extra(str, Enum):
+    allow = "allow"
 
 
 class Option2(BaseModel):
@@ -54,7 +119,7 @@ class Nested(BaseModel):
     integer: int
     option_1: Option1
     union: Union[Option1, Option2]
-    optional: Optional[Option2]
+    optional: Optional[Option2] = None
 
 
 class GeoObject(BaseModel):
@@ -69,7 +134,7 @@ class Sample(Document):
     float_num: float
     string: str
     nested: Nested
-    optional: Optional[Option2]
+    optional: Optional[Option2] = None
     union: Union[Option1, Option2]
     geo: GeoObject
     const: str = "TEST"
@@ -82,9 +147,9 @@ class SubDocument(BaseModel):
 
 class DocumentTestModel(Document):
     test_int: int
-    test_list: List[SubDocument] = Field(hidden=True)
     test_doc: SubDocument
     test_str: str
+    test_list: List[SubDocument] = Field(exclude=True)
 
     class Settings:
         use_cache = True
@@ -131,6 +196,17 @@ class DocumentTestModelWithIndexFlagsAliases(Document):
     )
 
 
+class DocumentTestModelIndexFlagsAnnotated(Document):
+    str_index: Indexed(str, index_type=pymongo.TEXT)
+    str_index_annotated: Indexed(str, index_type=pymongo.ASCENDING)
+    uuid_index_annotated: Annotated[UUID4, Indexed(unique=True)]
+
+    if not IS_PYDANTIC_V2:
+        # The UUID4 type raises a ValueError with the current
+        # implementation of Indexed when using Pydantic v2.
+        uuid_index: Indexed(UUID4, unique=True)
+
+
 class DocumentTestModelWithComplexIndex(Document):
     test_int: int
     test_list: List[SubDocument]
@@ -174,6 +250,13 @@ class DocumentTestModelFailInspection(Document):
         name = "DocumentTestModel"
 
 
+class DocumentWithDeprecatedHiddenField(Document):
+    if IS_PYDANTIC_V2:
+        test_hidden: List[str] = Field(json_schema_extra={"hidden": True})
+    else:
+        test_hidden: List[str] = Field(hidden=True)
+
+
 class DocumentWithCustomIdUUID(Document):
     id: UUID = Field(default_factory=uuid4)
     name: str
@@ -186,7 +269,7 @@ class DocumentWithCustomIdInt(Document):
 
 class DocumentWithCustomFiledsTypes(Document):
     color: Color
-    decimal: Decimal
+    decimal: DecimalAnnotation
     secret_bytes: SecretBytes
     secret_string: SecretStr
     ipv4address: IPv4Address
@@ -200,6 +283,18 @@ class DocumentWithCustomFiledsTypes(Document):
     tuple_type: Tuple[int, str]
     path: Path
 
+    class Settings:
+        bson_encoders = {Color: vars}
+
+    if IS_PYDANTIC_V2:
+        model_config = ConfigDict(
+            arbitrary_types_allowed=True,
+        )
+    else:
+
+        class Config:
+            arbitrary_types_allowed = True
+
 
 class DocumentWithBsonEncodersFiledsTypes(Document):
     color: Color
@@ -210,6 +305,15 @@ class DocumentWithBsonEncodersFiledsTypes(Document):
             Color: lambda c: c.as_rgb(),
             datetime.datetime: lambda o: o.isoformat(timespec="microseconds"),
         }
+
+    if IS_PYDANTIC_V2:
+        model_config = ConfigDict(
+            arbitrary_types_allowed=True,
+        )
+    else:
+
+        class Config:
+            arbitrary_types_allowed = True
 
 
 class DocumentWithActions(Document):
@@ -363,6 +467,7 @@ class DocumentWithTurnedOffStateManagement(Document):
 class DocumentWithValidationOnSave(Document):
     num_1: int
     num_2: int
+    related: PydanticObjectId = Field(default_factory=PydanticObjectId)
 
     @after_event(ValidateOnSave)
     def num_2_plus_1(self):
@@ -383,20 +488,28 @@ class DocumentWithRevisionTurnedOn(Document):
 
 
 class DocumentWithPydanticConfig(Document):
-    num_1: int
+    if IS_PYDANTIC_V2:
+        model_config = ConfigDict(validate_assignment=True)
+    else:
 
-    class Config(Document.Config):
-        validate_assignment = True
+        class Config:
+            validate_assignment = True
+
+    num_1: int
 
 
 class DocumentWithExtras(Document):
+    if IS_PYDANTIC_V2:
+        model_config = ConfigDict(extra="allow")
+    else:
+
+        class Config:
+            extra = "allow"
+
     num_1: int
 
-    class Config(Document.Config):
-        extra = Extra.allow
 
-
-class DocumentWithExtrasKw(Document, extra=Extra.allow):
+class DocumentWithExtrasKw(Document, extra="allow"):
     num_1: int
 
 
@@ -412,13 +525,22 @@ class Lock(Document):
 class Window(Document):
     x: int
     y: int
-    lock: Optional[Link[Lock]]
+    lock: Optional[Link[Lock]] = None
+
+
+class WindowWithValidationOnSave(Document):
+    x: int
+    y: int
+    lock: Optional[Link[Lock]] = None
+
+    class Settings:
+        validate_on_save = True
 
 
 class Door(Document):
     t: int = 10
-    window: Optional[Link[Window]]
-    locks: Optional[List[Link[Lock]]]
+    window: Optional[Link[Window]] = None
+    locks: Optional[List[Link[Lock]]] = None
 
 
 class Roof(Document):
@@ -428,18 +550,24 @@ class Roof(Document):
 class House(Document):
     windows: List[Link[Window]]
     door: Link[Door]
-    roof: Optional[Link[Roof]]
-    yards: Optional[List[Link[Yard]]]
-    name: Indexed(str) = Field(hidden=True)
+    roof: Optional[Link[Roof]] = None
+    yards: Optional[List[Link[Yard]]] = None
     height: Indexed(int) = 2
+    name: Indexed(str) = Field(exclude=True)
 
-    class Config:
-        extra = Extra.allow
+    if IS_PYDANTIC_V2:
+        model_config = ConfigDict(
+            extra="allow",
+        )
+    else:
+
+        class Config:
+            extra = Extra.allow
 
 
 class DocumentForEncodingTest(Document):
-    bytes_field: Optional[bytes]
-    datetime_field: Optional[datetime.datetime]
+    bytes_field: Optional[bytes] = None
+    datetime_field: Optional[datetime.datetime] = None
 
 
 class DocumentWithTimeseries(Document):
@@ -455,19 +583,6 @@ class DocumentWithStringField(Document):
 
 class DocumentForEncodingTestDate(Document):
     date_field: datetime.date = Field(default_factory=datetime.date.today)
-
-    class Settings:
-        name = "test_date"
-        bson_encoders = {
-            datetime.date: lambda dt: datetime.datetime(
-                year=dt.year,
-                month=dt.month,
-                day=dt.day,
-                hour=0,
-                minute=0,
-                second=0,
-            )
-        }
 
 
 class DocumentUnion(UnionDoc):
@@ -562,7 +677,7 @@ class Bicycle(Vehicle):
 class Fuelled(BaseModel):
     """Just a mixin"""
 
-    fuel: Optional[str]
+    fuel: Optional[str] = None
 
 
 class Car(Vehicle, Fuelled):
@@ -591,11 +706,11 @@ class MyDocNonRoot(Document):
         use_state_management = True
 
 
-class TestNonRoot(MixinNonRoot, MyDocNonRoot):
+class DocNonRoot(MixinNonRoot, MyDocNonRoot):
     name: str
 
 
-class Test2NonRoot(MyDocNonRoot):
+class Doc2NonRoot(MyDocNonRoot):
     name: str
 
 
@@ -615,12 +730,18 @@ class SampleLazyParsing(Document):
         [],
     )
 
+    if IS_PYDANTIC_V2:
+        model_config = ConfigDict(
+            validate_assignment=True,
+        )
+    else:
+
+        class Config:
+            validate_assignment = True
+
     class Settings:
         lazy_parsing = True
         use_state_management = True
-
-    class Config:
-        validate_assignment = True
 
 
 class RootDocument(Document):
@@ -645,10 +766,10 @@ class BDocument(RootDocument):
 
 
 class StateAndDecimalFieldModel(Document):
-    amt: decimal.Decimal
-    other_amt: condecimal(
-        decimal_places=1, multiple_of=decimal.Decimal("0.5")
-    ) = 0
+    amt: DecimalAnnotation
+    other_amt: DecimalAnnotation = Field(
+        decimal_places=1, multiple_of=0.5, default=0
+    )
 
     class Settings:
         name = "amounts"
@@ -663,18 +784,18 @@ class Region(Document):
 
 
 class UsersAddresses(Document):
-    region_id: Optional[Link[Region]]
+    region_id: Optional[Link[Region]] = None
     phone_number: Optional[str] = None
     street: Optional[str] = None
 
 
 class AddressView(BaseModel):
-    id: Optional[PydanticObjectId] = Field(alias="_id")
-    phone_number: Optional[str]
-    street: Optional[str]
-    state: Optional[str]
-    city: Optional[str]
-    district: Optional[str]
+    id: Optional[PydanticObjectId] = Field(alias="_id", default=None)
+    phone_number: Optional[str] = None
+    street: Optional[str] = None
+    state: Optional[str] = None
+    city: Optional[str] = None
+    district: Optional[str] = None
 
     class Settings:
         projection = {
@@ -688,16 +809,24 @@ class AddressView(BaseModel):
 
 
 class SelfLinked(Document):
-    item: Optional[Link["SelfLinked"]]
+    item: Optional[Link["SelfLinked"]] = None
     s: str
+
+    class Settings:
+        max_nesting_depth = 2
 
 
 class LoopedLinksA(Document):
-    b: "LoopedLinksB"
+    b: Link["LoopedLinksB"]
+    s: str
+
+    class Settings:
+        max_nesting_depths_per_field = {"b": 2}
 
 
 class LoopedLinksB(Document):
-    a: Optional[LoopedLinksA]
+    a: Optional[Link[LoopedLinksA]] = None
+    s: str
 
 
 class DocWithCollectionInnerClass(Document):
@@ -708,13 +837,19 @@ class DocWithCollectionInnerClass(Document):
 
 
 class DocumentWithDecimalField(Document):
-    amt: decimal.Decimal
-    other_amt: pydantic.condecimal(
-        decimal_places=1, multiple_of=decimal.Decimal("0.5")
-    ) = 0
+    amt: DecimalAnnotation
+    other_amt: DecimalAnnotation = Field(
+        decimal_places=1, multiple_of=0.5, default=0
+    )
 
-    class Config:
-        validate_assignment = True
+    if IS_PYDANTIC_V2:
+        model_config = ConfigDict(
+            validate_assignment=True,
+        )
+    else:
+
+        class Config:
+            validate_assignment = True
 
     class Settings:
         name = "amounts"
@@ -732,12 +867,12 @@ class DocumentWithDecimalField(Document):
 
 
 class ModelWithOptionalField(BaseModel):
-    s: Optional[str]
+    s: Optional[str] = None
     i: int
 
 
 class DocumentWithKeepNullsFalse(Document):
-    o: Optional[str]
+    o: Optional[str] = None
     m: ModelWithOptionalField
 
     class Settings:
@@ -761,7 +896,24 @@ class DocumentWithLink(Document):
 
 
 class DocumentWithBackLink(Document):
-    back_link: BackLink[DocumentWithLink] = Field(original_field="link")
+    if IS_PYDANTIC_V2:
+        back_link: BackLink[DocumentWithLink] = Field(
+            json_schema_extra={"original_field": "link"},
+        )
+    else:
+        back_link: BackLink[DocumentWithLink] = Field(original_field="link")
+    i: int = 1
+
+
+class DocumentWithOptionalBackLink(Document):
+    if IS_PYDANTIC_V2:
+        back_link: Optional[BackLink[DocumentWithLink]] = Field(
+            json_schema_extra={"original_field": "link"},
+        )
+    else:
+        back_link: Optional[BackLink[DocumentWithLink]] = Field(
+            original_field="link"
+        )
     i: int = 1
 
 
@@ -771,9 +923,26 @@ class DocumentWithListLink(Document):
 
 
 class DocumentWithListBackLink(Document):
-    back_link: List[BackLink[DocumentWithListLink]] = Field(
-        original_field="link"
-    )
+    if IS_PYDANTIC_V2:
+        back_link: List[BackLink[DocumentWithListLink]] = Field(
+            json_schema_extra={"original_field": "link"},
+        )
+    else:
+        back_link: List[BackLink[DocumentWithListLink]] = Field(
+            original_field="link"
+        )
+    i: int = 1
+
+
+class DocumentWithOptionalListBackLink(Document):
+    if IS_PYDANTIC_V2:
+        back_link: Optional[List[BackLink[DocumentWithListLink]]] = Field(
+            json_schema_extra={"original_field": "link"},
+        )
+    else:
+        back_link: Optional[List[BackLink[DocumentWithListLink]]] = Field(
+            original_field="link"
+        )
     i: int = 1
 
 
@@ -830,3 +999,105 @@ class DocumentWithCustomInit(Document):
     @classmethod
     async def custom_init(cls):
         cls.s = "TEST2"
+
+
+class LinkDocumentForTextSeacrh(Document):
+    i: int
+
+
+class DocumentWithTextIndexAndLink(Document):
+    s: str
+    link: Link[LinkDocumentForTextSeacrh]
+
+    class Settings:
+        indexes = [
+            pymongo.IndexModel(
+                [("s", pymongo.TEXT)],
+                name="text_index",
+            )
+        ]
+
+
+class DocumentWithList(Document):
+    list_values: List[str]
+
+
+class DocumentWithBsonBinaryField(Document):
+    binary_field: BsonBinary
+
+
+if IS_PYDANTIC_V2:
+    Pets = RootModel[List[str]]
+else:
+    Pets = List[str]
+
+
+class DocumentWithRootModelAsAField(Document):
+    pets: Pets
+
+
+class DocWithCallWrapper(Document):
+    name: str
+
+    if IS_PYDANTIC_V2:
+
+        @validate_call
+        def foo(self, bar: str) -> None:
+            print(f"foo {bar}")
+
+
+class DocumentWithHttpUrlField(Document):
+    url_field: HttpUrl
+
+
+class DocumentWithComplexDictKey(Document):
+    dict_field: Dict[UUID, datetime.datetime]
+
+
+class DocumentWithIndexedObjectId(Document):
+    pyid: Indexed(PydanticObjectId)
+    uuid: Annotated[UUID4, Indexed(unique=True)]
+    email: Annotated[EmailStr, Indexed(unique=True)]
+
+
+class DocumentToTestSync(Document):
+    s: str = "TEST"
+    i: int = 1
+    n: Nested = Nested(
+        integer=1, option_1=Option1(s="test"), union=Option1(s="test")
+    )
+    o: Optional[Option2] = None
+    d: Dict[str, Any] = {}
+
+    class Settings:
+        use_state_management = True
+
+
+class DocumentWithLinkForNesting(Document):
+    link: Link["DocumentWithBackLinkForNesting"]
+    s: str
+
+    class Settings:
+        max_nesting_depths_per_field = {"link": 0}
+
+
+class DocumentWithBackLinkForNesting(Document):
+    if IS_PYDANTIC_V2:
+        back_link: BackLink[DocumentWithLinkForNesting] = Field(
+            json_schema_extra={"original_field": "link"},
+        )
+    else:
+        back_link: BackLink[DocumentWithLinkForNesting] = Field(
+            original_field="link"
+        )
+    i: int
+
+    class Settings:
+        max_nesting_depths_per_field = {"back_link": 5}
+
+
+class LongSelfLink(Document):
+    link: Optional[Link["LongSelfLink"]] = None
+
+    class Settings:
+        max_nesting_depth = 50
