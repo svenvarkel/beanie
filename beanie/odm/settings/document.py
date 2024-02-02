@@ -21,6 +21,7 @@ class DocumentSettings(ItemSettings):
 
     indexes: List[IndexModelField] = Field(default_factory=list)
     merge_indexes: bool = False
+    skip_indexes: bool = False
     timeseries: Optional[TimeSeriesConfig] = None
 
     lazy_parsing: bool = False

@@ -63,6 +63,7 @@ class Initializer:
             List[Union[Type["DocType"], Type["View"], str]]
         ] = None,
         allow_index_dropping: bool = False,
+        skip_create_indexes: Optional[bool] = False,
         recreate_views: bool = False,
         multiprocessing_mode: bool = False,
     ):
@@ -83,6 +84,7 @@ class Initializer:
 
         self.inited_classes: List[Type] = []
         self.allow_index_dropping = allow_index_dropping
+        self.skip_create_indexes = skip_create_indexes
         self.recreate_views = recreate_views
 
         self.models_with_updated_forward_refs: List[Type[BaseModel]] = []
@@ -457,7 +459,12 @@ class Initializer:
 
         cls.set_collection(collection)
 
-    async def init_indexes(self, cls, allow_index_dropping: bool = False):
+    async def init_indexes(
+        self,
+        cls,
+        allow_index_dropping: bool = False,
+        skip_create_indexes: Optional[bool] = False,
+    ):
         """
         Async indexes initializer
         """
@@ -526,7 +533,7 @@ class Initializer:
                 await collection.drop_index(index.name)
 
         # create indices
-        if found_indexes:
+        if found_indexes and skip_create_indexes is not True:
             new_indexes += await collection.create_indexes(
                 IndexModelField.list_to_index_model(new_indexes)
             )
@@ -575,7 +582,11 @@ class Initializer:
 
             await self.init_document_collection(cls)
             if not cls.get_settings().skip_indexes is True:
-                await self.init_indexes(cls, self.allow_index_dropping)
+                await self.init_indexes(
+                    cls,
+                    self.allow_index_dropping,
+                    self.skip_create_indexes,
+                )
             self.init_document_fields(cls)
             self.init_cache(cls)
             self.init_actions(cls)
@@ -730,6 +741,7 @@ async def init_beanie(
         List[Union[Type[Document], Type["View"], str]]
     ] = None,
     allow_index_dropping: bool = False,
+    skip_create_indexes: Optional[bool] = False,
     recreate_views: bool = False,
     multiprocessing_mode: bool = False,
 ):
@@ -753,6 +765,7 @@ async def init_beanie(
         connection_string=connection_string,
         document_models=document_models,
         allow_index_dropping=allow_index_dropping,
+        skip_create_indexes=skip_create_indexes,
         recreate_views=recreate_views,
         multiprocessing_mode=multiprocessing_mode,
     )
